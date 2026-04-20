@@ -1,0 +1,9 @@
+name: rpi5
+description: "Raspberry Pi 5 — 8 GB"
+arch: arm64
+cpus: 4
+memory: "7168m"
+memory_swap: "7168m"
+blkio_weight: 300
+blkio_read_bps: 104857600
+blkio_write_bps: 104857600

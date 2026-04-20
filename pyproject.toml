@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "p4n4-emu"
+version = "0.1.0"
+description = "Sandbox emulator for the p4n4 IoT + Edge AI platform"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+keywords = ["iot", "edge-ai", "docker", "emulator", "raspberry-pi"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Testing",
+]
+dependencies = [
+  "typer[all]>=0.12",
+  "rich>=13",
+  "pyyaml>=6",
+  "jinja2>=3",
+  "paho-mqtt>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.4"]
+
+[project.scripts]
+p4n4-emu = "p4n4_emu.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/raisga/p4n4-emu"
+Issues = "https://github.com/raisga/p4n4-emu/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["p4n4_emu"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.11",
+]

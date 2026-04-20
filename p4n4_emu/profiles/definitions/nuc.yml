@@ -1,0 +1,9 @@
+name: nuc
+description: "Intel NUC — 4 cores / 16 GB (mid-range x86)"
+arch: x86_64
+cpus: 4
+memory: "14336m"
+memory_swap: "14336m"
+blkio_weight: 500
+blkio_read_bps: 209715200
+blkio_write_bps: 209715200

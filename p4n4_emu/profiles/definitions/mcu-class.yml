@@ -1,0 +1,9 @@
+name: mcu-class
+description: "MCU-class — 1 core / 256 MB (ultra-constrained)"
+arch: x86_64
+cpus: 1
+memory: "256m"
+memory_swap: "256m"
+blkio_weight: 100
+blkio_read_bps: 10485760
+blkio_write_bps: 10485760

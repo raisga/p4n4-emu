@@ -1,0 +1,9 @@
+name: rpi4
+description: "Raspberry Pi 4 — 4 GB"
+arch: arm64
+cpus: 4
+memory: "3584m"
+memory_swap: "3584m"
+blkio_weight: 200
+blkio_read_bps: 52428800
+blkio_write_bps: 52428800
