@@ -42,11 +42,10 @@ p4n4-emu setup --check-only
 p4n4-emu setup --arch arm64
 
 # Start the IoT stack constrained to Raspberry Pi 5 specs
-cd ~/p4n4/docker/iot
-p4n4-emu up --profile rpi5
+p4n4-emu up --stack-dir ~/p4n4/docker/iot --profile rpi5 
 
 # Start all stacks with synthetic sensor data
-p4n4-emu up --profile rpi5 --stack all --sim --stack-dir ~/p4n4/docker
+p4n4-emu up --stack all --stack-dir ~/p4n4/docker --profile rpi5 --sim
 
 # Preview overlay without starting (dry run)
 p4n4-emu up --profile mcu-class --dry-run
