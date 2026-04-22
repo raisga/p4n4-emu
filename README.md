@@ -32,31 +32,81 @@ cd ~/p4n4/demo/emu
 uv sync          # or: pip install -e .
 ```
 
-## Quick start
+## Setup guide
+
+Follow these steps once to get p4n4-emu running on your workstation.
+
+### 1. Install dependencies
+
+Ensure Docker Engine >= 24 and Docker Compose >= 2.17 are installed and the daemon is running. Python >= 3.11 is also required.
 
 ```bash
-# Check your environment
-p4n4-emu setup --check-only
-
-# Enable ARM64 emulation (once, requires Docker)
-p4n4-emu setup --arch arm64
-
-# Start the IoT stack constrained to Raspberry Pi 5 specs
-p4n4-emu up --stack-dir ~/p4n4/docker/iot --profile rpi5 
-
-# Start all stacks with synthetic sensor data
-p4n4-emu up --stack all --stack-dir ~/p4n4/docker --profile rpi5 --sim
-
-# Preview overlay without starting (dry run)
-p4n4-emu up --profile mcu-class --dry-run
-
-# Check status
-p4n4-emu status --profile rpi5
-
-# Stop
-p4n4-emu down --profile rpi5
-p4n4-emu down --profile rpi5 --volumes   # also remove data volumes
+docker version        # Engine version
+docker compose version
+python3 --version
 ```
+
+### 2. Install p4n4-emu
+
+From the repo root, install the package and its dependencies:
+
+```bash
+cd ~/p4n4/demo/emu
+uv sync
+```
+
+Verify the CLI is available:
+
+```bash
+uv run p4n4-emu --help
+```
+
+### 3. Run preflight checks
+
+```bash
+uv run p4n4-emu setup --check-only
+```
+
+All checks should show **OK**. A `cgroup v2` warning means CPU/memory limits won't be enforced — check your kernel or Docker Desktop settings if that matters for your testing.
+
+### 4. (Optional) Enable ARM64 emulation
+
+Required only when using `--arch arm64` (e.g. `rpi4` / `rpi5` profiles on an x86 host):
+
+```bash
+uv run p4n4-emu setup --arch arm64
+```
+
+This runs `tonistiigi/binfmt --install arm64` via Docker once per host.
+
+### 5. Start a stack
+
+Point `--stack-dir` at a directory containing a `docker-compose.yml` and choose a hardware profile:
+
+```bash
+# Raspberry Pi 5 constraints, IoT stack only
+uv run p4n4-emu up --stack-dir ~/p4n4/docker/iot --profile rpi5
+
+# All stacks + synthetic sensor data
+uv run p4n4-emu up --stack all --stack-dir ~/p4n4/docker --profile rpi5 --sim
+```
+
+Use `--dry-run` first if you want to inspect the generated overlay before containers start:
+
+```bash
+uv run p4n4-emu up --stack-dir ~/p4n4/docker/iot --profile rpi5 --dry-run
+```
+
+### 6. Check status and stop
+
+```bash
+uv run p4n4-emu status --profile rpi5
+
+uv run p4n4-emu down --profile rpi5            # stop containers
+uv run p4n4-emu down --profile rpi5 --volumes  # stop and remove data volumes
+```
+
+---
 
 ## Command reference
 
