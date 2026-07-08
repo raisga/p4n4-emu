@@ -120,8 +120,19 @@ Point `--stack-dir` at the directory that contains your `docker-compose.yml` (th
 uv run p4n4-emu up \
   --profile rpi5 \
   --stack iot \
-  --stack-dir ~/p4n4/docker/iot \
+  --stack-dir ~/p4n4/stacks/iot \
   --sim
+```
+
+If you run the command inside a project scaffolded by `p4n4 init`, you can drop both
+`--stack` and `--stack-dir`: the emulator finds the project's `.p4n4.json`, targets its
+enabled stacks, and resolves each stack's directory for either layout — flat
+(single-layer, `docker-compose.yml` at the project root) or multi-layer
+(`<project>/iot/`, `<project>/ai/`):
+
+```bash
+cd ~/projects/my-p4n4-project
+uv run p4n4-emu up --profile rpi5 --sim
 ```
 
 What each flag does:
@@ -129,14 +140,14 @@ What each flag does:
 | Flag | Purpose |
 |---|---|
 | `--profile rpi5` | Apply Raspberry Pi 5 CPU/memory/disk constraints |
-| `--stack iot` | Target the IoT stack (MQTT, InfluxDB, Node-RED, Grafana) |
-| `--stack-dir` | Path to the directory with the base `docker-compose.yml` |
+| `--stack iot` | Target the IoT stack (MQTT, InfluxDB, Node-RED, Grafana); accepts comma-separated names or `all`; defaults to the project's enabled stacks |
+| `--stack-dir` | Path to the directory with the base `docker-compose.yml` (not needed inside a p4n4 project) |
 | `--sim` | Also start the sensor simulator container |
 
 Use `--dry-run` to preview the generated overlay without starting anything:
 
 ```bash
-uv run p4n4-emu up --dry-run --profile rpi5 --stack iot --stack-dir ~/p4n4/docker/iot
+uv run p4n4-emu up --dry-run --profile rpi5 --stack iot --stack-dir ~/p4n4/stacks/iot
 ```
 
 Expected output (dry-run):
@@ -167,7 +178,7 @@ Dry run — no containers started.
 ## 5. Verify the Stack is Running
 
 ```bash
-uv run p4n4-emu status --profile rpi5 --stack iot --stack-dir ~/p4n4/docker/iot
+uv run p4n4-emu status --profile rpi5 --stack iot --stack-dir ~/p4n4/stacks/iot
 ```
 
 Expected output:
@@ -348,13 +359,13 @@ uv run p4n4-emu sim stop
 Stop the emulated stack:
 
 ```bash
-uv run p4n4-emu down --profile rpi5 --stack iot --stack-dir ~/p4n4/docker/iot
+uv run p4n4-emu down --profile rpi5 --stack iot --stack-dir ~/p4n4/stacks/iot
 ```
 
 To also remove persistent volumes (InfluxDB data, Grafana dashboards):
 
 ```bash
-uv run p4n4-emu down --profile rpi5 --stack iot --stack-dir ~/p4n4/docker/iot --volumes
+uv run p4n4-emu down --profile rpi5 --stack iot --stack-dir ~/p4n4/stacks/iot --volumes
 ```
 
 ---

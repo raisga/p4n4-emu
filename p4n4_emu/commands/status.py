@@ -12,20 +12,24 @@ from rich.table import Table
 from p4n4_emu.profiles.loader import load_profile
 from p4n4_emu.utils import compose as dc
 from p4n4_emu.utils.docker_info import detect_block_device
+from p4n4_emu.utils.project import expand_stacks, resolve_stack_dir
 
 console = Console()
 
-_STACKS = ("iot", "ai", "edge")
 _OVERLAY_ROOT = Path.home() / ".p4n4-emu" / "overlays"
 
 
 def cmd(
-    profile: Annotated[
-        str, typer.Option("--profile", "-p", help="Profile to display.")
-    ] = "rpi5",
+    profile: Annotated[str, typer.Option("--profile", "-p", help="Profile to display.")] = "rpi5",
     stack: Annotated[
-        str, typer.Option("--stack", "-s", help="Stack to query: iot, ai, edge, all.")
-    ] = "iot",
+        str | None,
+        typer.Option(
+            "--stack",
+            "-s",
+            help="Stack(s) to query: iot, ai, edge, comma-separated, or all. "
+            "Default: the current p4n4 project's enabled stacks (or iot).",
+        ),
+    ] = None,
     stack_dir: Annotated[
         Path | None,
         typer.Option("--stack-dir", help="Directory containing docker-compose.yml."),
@@ -52,9 +56,9 @@ def cmd(
     ptable.add_row("Block device", blkio or "[dim]not detected[/dim]")
     console.print(ptable)
 
-    stacks_to_check = list(_STACKS) if stack == "all" else [stack]
+    stacks_to_check = expand_stacks(stack)
     for s in stacks_to_check:
-        cwd = _resolve_stack_dir(stack_dir, s)
+        cwd = resolve_stack_dir(stack_dir, s)
         if cwd is None:
             continue
         overlay_file = _OVERLAY_ROOT / profile / f"{s}.emu.yml"
@@ -75,7 +79,7 @@ def cmd(
             health = svc.get("Health", "")
             ports_raw = svc.get("Publishers") or []
             ports: list[str] = []
-            for p in (ports_raw if isinstance(ports_raw, list) else []):
+            for p in ports_raw if isinstance(ports_raw, list) else []:
                 pub = p.get("PublishedPort", 0)
                 tgt = p.get("TargetPort", 0)
                 proto = p.get("Protocol", "tcp")
@@ -83,27 +87,19 @@ def cmd(
                     ports.append(f"{pub}→{tgt}/{proto}")
 
             state_fmt = (
-                f"[green]{state}[/green]" if state == "running"
-                else f"[red]{state}[/red]" if state == "exited"
+                f"[green]{state}[/green]"
+                if state == "running"
+                else f"[red]{state}[/red]"
+                if state == "exited"
                 else state
             )
             health_fmt = (
-                f"[green]{health}[/green]" if health == "healthy"
-                else f"[yellow]{health}[/yellow]" if health in ("starting", "unhealthy")
+                f"[green]{health}[/green]"
+                if health == "healthy"
+                else f"[yellow]{health}[/yellow]"
+                if health in ("starting", "unhealthy")
                 else health
             )
             ctable.add_row(name, state_fmt, health_fmt, ", ".join(ports))
 
         console.print(ctable)
-
-
-def _resolve_stack_dir(base: Path | None, stack: str) -> Path | None:
-    cwd = Path.cwd()
-    candidates = []
-    if base is not None:
-        candidates += [base, base / stack]
-    candidates += [cwd, cwd / stack, cwd.parent / "docker" / stack]
-    for c in candidates:
-        if (c / "docker-compose.yml").exists():
-            return c
-    return None

@@ -14,10 +14,10 @@ from p4n4_emu.profiles.loader import load_profile
 from p4n4_emu.utils import compose as dc
 from p4n4_emu.utils.docker_info import detect_block_device
 from p4n4_emu.utils.preflight import check_or_exit
+from p4n4_emu.utils.project import STACKS, expand_stacks, resolve_stack_dir
 
 console = Console()
 
-_STACKS = ("iot", "ai", "edge")
 _OVERLAY_ROOT = Path.home() / ".p4n4-emu" / "overlays"
 
 
@@ -32,18 +32,20 @@ def cmd(
         str, typer.Option("--profile", "-p", help="Hardware profile name.")
     ] = "rpi5",
     stack: Annotated[
-        str, typer.Option("--stack", "-s", help="Stack(s): iot, ai, edge, all.")
-    ] = "iot",
+        str | None,
+        typer.Option(
+            "--stack",
+            "-s",
+            help="Stack(s): iot, ai, edge, comma-separated, or all. "
+            "Default: the current p4n4 project's enabled stacks (or iot).",
+        ),
+    ] = None,
     stack_dir: Annotated[
         Path | None,
         typer.Option("--stack-dir", help="Dir containing docker-compose.yml."),
     ] = None,
-    arch: Annotated[
-        str, typer.Option("--arch", help="Architecture emulation, e.g. arm64.")
-    ] = "",
-    sim: Annotated[
-        bool, typer.Option("--sim", help="Also start the sensor simulator.")
-    ] = False,
+    arch: Annotated[str, typer.Option("--arch", help="Architecture emulation, e.g. arm64.")] = "",
+    sim: Annotated[bool, typer.Option("--sim", help="Also start the sensor simulator.")] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Print commands without executing.")
     ] = False,
@@ -59,25 +61,23 @@ def cmd(
         console.print(f"[dim]Block device detected:[/dim] {blkio_device}")
     else:
         console.print(
-            "[yellow]Warning:[/yellow] No block device detected — "
-            "disk I/O limits will be skipped."
+            "[yellow]Warning:[/yellow] No block device detected — disk I/O limits will be skipped."
         )
 
-    stacks_to_run = list(_STACKS) if stack == "all" else [stack]
+    stacks_to_run = expand_stacks(stack)
 
     for s in stacks_to_run:
-        if s not in _STACKS:
+        if s not in STACKS:
             console.print(
-                f"[red]Unknown stack:[/red] {s!r}. "
-                f"Choose from: {', '.join(_STACKS)} or all."
+                f"[red]Unknown stack:[/red] {s!r}. Choose from: {', '.join(STACKS)} or all."
             )
             raise typer.Exit(1)
 
-        cwd = _resolve_stack_dir(stack_dir, s)
+        cwd = resolve_stack_dir(stack_dir, s)
         if cwd is None:
             console.print(
                 f"[red]Cannot find docker-compose.yml for stack {s!r}.[/red] "
-                "Use --stack-dir."
+                "Run inside a p4n4 project, or use --stack-dir."
             )
             raise typer.Exit(1)
 
@@ -94,9 +94,7 @@ def cmd(
             continue
 
         overlay_file.write_text(overlay_content)
-        console.print(
-            f"[cyan]Starting {s} stack[/cyan] with profile [bold]{prof.name}[/bold]…"
-        )
+        console.print(f"[cyan]Starting {s} stack[/cyan] with profile [bold]{prof.name}[/bold]…")
         rc = dc.up(cwd, overlay=overlay_file)
         if rc != 0:
             raise typer.Exit(rc)
@@ -108,18 +106,6 @@ def cmd(
         _print_summary(prof, blkio_device, stacks_to_run)
 
 
-def _resolve_stack_dir(base: Path | None, stack: str) -> Path | None:
-    cwd = Path.cwd()
-    candidates = []
-    if base is not None:
-        candidates += [base, base / stack]
-    candidates += [cwd, cwd / stack, cwd.parent / "docker" / stack]
-    for c in candidates:
-        if (c / "docker-compose.yml").exists():
-            return c
-    return None
-
-
 def _start_sim() -> None:
     import subprocess
 
@@ -127,22 +113,27 @@ def _start_sim() -> None:
     sim_dir = Path(__file__).parent.parent / "sim"
     pkg_root = str(Path(__file__).parent.parent.parent)
     subprocess.Popen(
-        ["docker", "build", "-t", "p4n4-sensor-sim",
-         "-f", str(sim_dir / "Dockerfile"), "."],
+        ["docker", "build", "-t", "p4n4-sensor-sim", "-f", str(sim_dir / "Dockerfile"), "."],
         cwd=pkg_root,
     )
-    subprocess.Popen([
-        "docker", "run", "-d", "--rm",
-        "--name", "p4n4-sensor-sim",
-        "--network", "p4n4-net",
-        "-e", "MQTT_HOST=p4n4-mqtt",
-        "p4n4-sensor-sim",
-    ])
+    subprocess.Popen(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            "p4n4-sensor-sim",
+            "--network",
+            "p4n4-net",
+            "-e",
+            "MQTT_HOST=p4n4-mqtt",
+            "p4n4-sensor-sim",
+        ]
+    )
 
 
-def _print_summary(
-    prof, blkio_device: str | None, stacks: list[str]
-) -> None:
+def _print_summary(prof, blkio_device: str | None, stacks: list[str]) -> None:
     table = Table(title=f"p4n4-emu active — profile: {prof.name}", show_lines=False)
     table.add_column("Setting")
     table.add_column("Value")
@@ -150,9 +141,7 @@ def _print_summary(
     table.add_row("CPU limit", f"{prof.cpus} cores")
     table.add_row("Memory limit", prof.memory)
     disk_io = (
-        f"{prof.blkio_read_bps // 1_000_000} MB/s"
-        if blkio_device
-        else "no limit (no block device)"
+        f"{prof.blkio_read_bps // 1_000_000} MB/s" if blkio_device else "no limit (no block device)"
     )
     table.add_row("Disk I/O", disk_io)
     table.add_row("Architecture", prof.arch)

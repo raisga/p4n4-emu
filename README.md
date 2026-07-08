@@ -81,11 +81,23 @@ This runs `tonistiigi/binfmt --install arm64` via Docker once per host.
 
 ### 5. Start a stack
 
-Point `--stack-dir` at a directory containing a `docker-compose.yml` and choose a hardware profile:
+Inside a project scaffolded by `p4n4 init` (found via its `.p4n4.json`), the emulator
+detects the enabled stacks and their layout automatically — flat single-layer projects
+as well as multi-layer projects where each stack lives in its own subdirectory
+(`<project>/iot/`, `<project>/ai/`):
+
+```bash
+cd ~/projects/my-p4n4-project
+uv run p4n4-emu up --profile rpi5              # all enabled stacks
+uv run p4n4-emu up --profile rpi5 --stack ai   # one stack only
+```
+
+Outside a project, point `--stack-dir` at a directory containing a `docker-compose.yml`
+(or a parent with per-stack subdirectories):
 
 ```bash
 # Raspberry Pi 5 constraints, IoT stack only
-uv run p4n4-emu up --stack-dir ~/p4n4/docker/iot --profile rpi5
+uv run p4n4-emu up --stack-dir ~/p4n4/stacks/iot --profile rpi5
 
 # All stacks + synthetic sensor data
 uv run p4n4-emu up --stack all --stack-dir ~/p4n4/docker --profile rpi5 --sim
@@ -94,7 +106,7 @@ uv run p4n4-emu up --stack all --stack-dir ~/p4n4/docker --profile rpi5 --sim
 Use `--dry-run` first if you want to inspect the generated overlay before containers start:
 
 ```bash
-uv run p4n4-emu up --stack-dir ~/p4n4/docker/iot --profile rpi5 --dry-run
+uv run p4n4-emu up --stack-dir ~/p4n4/stacks/iot --profile rpi5 --dry-run
 ```
 
 ### 6. Check status and stop
@@ -112,17 +124,23 @@ uv run p4n4-emu down --profile rpi5 --volumes  # stop and remove data volumes
 
 ```
 p4n4-emu setup [--arch arm64] [--check-only]
-p4n4-emu up    [--profile rpi5] [--stack iot|ai|edge|all]
+p4n4-emu up    [--profile rpi5] [--stack iot|ai|edge|iot,ai|all]
                [--stack-dir PATH] [--arch arm64] [--sim] [--dry-run]
-p4n4-emu down  [--profile rpi5] [--stack iot|ai|edge|all]
+p4n4-emu down  [--profile rpi5] [--stack iot|ai|edge|iot,ai|all]
                [--stack-dir PATH] [--volumes]
-p4n4-emu status [--profile rpi5] [--stack iot|ai|edge|all]
+p4n4-emu status [--profile rpi5] [--stack iot|ai|edge|iot,ai|all]
 p4n4-emu profile list
 p4n4-emu profile show <name>
 p4n4-emu sim start [--interval 2.0] [--devices 1] [--mqtt-host p4n4-mqtt]
 p4n4-emu sim stop
 p4n4-emu sim status
 ```
+
+Without `--stack`, `up`/`down`/`status` target the enabled stacks of the surrounding
+p4n4 project (`.p4n4.json` is found by walking up from the current directory), falling
+back to `iot`. Stack directories resolve in this order: `--stack-dir` (its `<stack>/`
+subdirectory first), then the p4n4 project layout (flat root or `<project>/<stack>/`),
+then a `<stack>/` or `docker-compose.yml` next to the current directory.
 
 ## GPIO stub
 
