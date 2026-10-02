@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 import typer
@@ -18,14 +19,18 @@ _SIM_NETWORK = "p4n4-net"
 _ROOT = Path(__file__).parent.parent.parent
 
 
-@app.command("start")
-def start_cmd(
-    interval: float = typer.Option(2.0, "--interval", help="Publish interval in seconds."),
-    devices: int = typer.Option(1, "--devices", help="Number of simulated sensor devices."),
-    mqtt_host: str = typer.Option("p4n4-mqtt", "--mqtt-host", help="Mosquitto hostname."),
-    rebuild: bool = typer.Option(False, "--rebuild", help="Force rebuild of the image."),
-) -> None:
-    """Start the sensor simulator container."""
+def start_simulator(
+    *,
+    interval: float = 2.0,
+    devices: int = 1,
+    mqtt_host: str = "p4n4-mqtt",
+    rebuild: bool = False,
+    broker_timeout: float = 60.0,
+) -> int:
+    """Build the image if needed, wait for the broker, and run the simulator.
+
+    Returns the exit code of the failing step, or 0 on success.
+    """
     sim_dir = Path(__file__).parent.parent / "sim"
 
     if rebuild or not _image_exists():
@@ -37,7 +42,13 @@ def start_cmd(
         ).returncode
         if rc != 0:
             console.print("[red]Failed to build sensor-sim image.[/red]")
-            raise typer.Exit(rc)
+            return rc
+
+    if not _wait_for_broker(mqtt_host, broker_timeout):
+        console.print(
+            f"[yellow]Warning:[/yellow] broker container {mqtt_host!r} is not ready after "
+            f"{broker_timeout:.0f}s; the simulator will keep retrying until it is."
+        )
 
     subprocess.run(["docker", "rm", "-f", _SIM_CONTAINER], capture_output=True, check=False)
 
@@ -46,6 +57,8 @@ def start_cmd(
             "docker", "run", "-d",
             "--name", _SIM_CONTAINER,
             "--network", _SIM_NETWORK,
+            # Restart if the broker drops or was not up yet; a clean stop exits 0
+            "--restart", "on-failure",
             "-e", f"MQTT_HOST={mqtt_host}",
             "-e", f"SIM_INTERVAL_SEC={interval}",
             "-e", f"SIM_DEVICE_COUNT={devices}",
@@ -61,6 +74,19 @@ def start_cmd(
         )
     else:
         console.print("[red]Failed to start sensor simulator.[/red]")
+    return rc
+
+
+@app.command("start")
+def start_cmd(
+    interval: float = typer.Option(2.0, "--interval", help="Publish interval in seconds."),
+    devices: int = typer.Option(1, "--devices", help="Number of simulated sensor devices."),
+    mqtt_host: str = typer.Option("p4n4-mqtt", "--mqtt-host", help="Mosquitto hostname."),
+    rebuild: bool = typer.Option(False, "--rebuild", help="Force rebuild of the image."),
+) -> None:
+    """Start the sensor simulator container."""
+    rc = start_simulator(interval=interval, devices=devices, mqtt_host=mqtt_host, rebuild=rebuild)
+    if rc != 0:
         raise typer.Exit(rc)
 
 
@@ -109,3 +135,29 @@ def _image_exists() -> bool:
         check=False,
     )
     return r.returncode == 0
+
+
+def _broker_state(container: str) -> str | None:
+    """Health status if the container has a healthcheck, else its run state."""
+    r = subprocess.run(
+        [
+            "docker", "inspect", container, "--format",
+            "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _wait_for_broker(container: str, timeout: float, poll: float = 2.0) -> bool:
+    """Wait until *container* is healthy (or running, without a healthcheck)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if _broker_state(container) in ("healthy", "running"):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        console.print(f"[dim]Waiting for {container}...[/dim]")
+        time.sleep(poll)

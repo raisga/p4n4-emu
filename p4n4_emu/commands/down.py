@@ -32,7 +32,7 @@ def cmd(
     ] = None,
     stack_dir: Annotated[
         Path | None,
-        typer.Option("--stack-dir", help="Directory containing docker-compose.yml."),
+        typer.Option("--stack-dir", help="Directory containing the stack's compose file."),
     ] = None,
     volumes: Annotated[
         bool,
@@ -55,7 +55,7 @@ def cmd(
         cwd = resolve_stack_dir(stack_dir, s)
         if cwd is None:
             console.print(
-                f"[yellow]Cannot find docker-compose.yml for stack {s!r} — skipping.[/yellow]"
+                f"[yellow]Cannot find a compose file for stack {s!r} — skipping.[/yellow]"
             )
             continue
 
@@ -67,4 +67,6 @@ def cmd(
         if rc != 0:
             console.print(f"[red]Failed to stop {s} stack (exit {rc}).[/red]")
 
-    subprocess.run(["docker", "rm", "-f", "p4n4-sensor-sim"], capture_output=True, check=False)
+    # The simulator publishes to the iot broker, so it goes down with iot only
+    if "iot" in stacks_to_stop:
+        subprocess.run(["docker", "rm", "-f", "p4n4-sensor-sim"], capture_output=True, check=False)

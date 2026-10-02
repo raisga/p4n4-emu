@@ -32,7 +32,7 @@ def cmd(
     ] = None,
     stack_dir: Annotated[
         Path | None,
-        typer.Option("--stack-dir", help="Directory containing docker-compose.yml."),
+        typer.Option("--stack-dir", help="Directory containing the stack's compose file."),
     ] = None,
 ) -> None:
     """Print active profile summary and container status."""

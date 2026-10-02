@@ -2,8 +2,39 @@
 
 from __future__ import annotations
 
+import platform as _platform
 import subprocess
 from pathlib import Path
+
+_BINFMT_DIR = Path("/proc/sys/fs/binfmt_misc")
+
+# Docker platform → (binfmt_misc handler, tonistiigi/binfmt --install name)
+_QEMU = {
+    "linux/arm64": ("qemu-aarch64", "arm64"),
+    "linux/arm/v7": ("qemu-arm", "arm"),
+    "linux/amd64": ("qemu-x86_64", "amd64"),
+}
+
+
+def host_platform() -> str:
+    """Docker platform of the machine running Docker (assumed to be this host)."""
+    machine = _platform.machine().lower()
+    if machine in ("aarch64", "arm64"):
+        return "linux/arm64"
+    if machine.startswith("armv7"):
+        return "linux/arm/v7"
+    return "linux/amd64"
+
+
+def needs_qemu(platform: str | None) -> bool:
+    """True when containers for *platform* cannot run natively on this host."""
+    return platform is not None and platform != host_platform()
+
+
+def qemu_handler(platform: str) -> tuple[Path, str]:
+    """binfmt_misc entry and binfmt installer name for *platform*."""
+    handler, install_name = _QEMU.get(platform, _QEMU["linux/arm64"])
+    return _BINFMT_DIR / handler, install_name
 
 
 def _run(args: list[str]) -> tuple[int, str]:
@@ -20,8 +51,11 @@ def _version_tuple(ver_str: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
-def run_preflight(require_qemu: bool = False) -> list[str]:
-    """Return a list of error strings; empty list means all checks passed."""
+def run_preflight(require_qemu: bool = False, platform: str = "linux/arm64") -> list[str]:
+    """Return a list of error strings; empty list means all checks passed.
+
+    With *require_qemu*, also checks the QEMU binfmt handler for *platform*.
+    """
     errors: list[str] = []
 
     # Docker Engine >= 24
@@ -50,24 +84,24 @@ def run_preflight(require_qemu: bool = False) -> list[str]:
             "Check your kernel boot parameters (systemd.unified_cgroup_hierarchy=1)."
         )
 
-    # QEMU binfmt for ARM64
+    # QEMU binfmt for the emulated architecture
     if require_qemu:
-        binfmt = Path("/proc/sys/fs/binfmt_misc/qemu-aarch64")
+        binfmt, install_name = qemu_handler(platform)
         if not binfmt.exists():
             errors.append(
-                "QEMU ARM64 binfmt not registered. "
-                "Run: p4n4-emu setup --arch arm64"
+                f"QEMU binfmt for {platform} not registered ({binfmt.name}). "
+                f"Run: p4n4-emu setup --arch {install_name}"
             )
 
     return errors
 
 
-def check_or_exit(require_qemu: bool = False) -> None:
+def check_or_exit(require_qemu: bool = False, platform: str = "linux/arm64") -> None:
     """Run preflight and raise SystemExit if any hard errors are found."""
     from rich.console import Console
 
     console = Console()
-    issues = run_preflight(require_qemu=require_qemu)
+    issues = run_preflight(require_qemu=require_qemu, platform=platform)
     warnings = [e for e in issues if e.startswith("WARNING")]
     errors = [e for e in issues if not e.startswith("WARNING")]
 

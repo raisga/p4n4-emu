@@ -23,6 +23,13 @@ def _docker_root() -> str | None:
         return r.stdout.strip().strip('"')
 
 
+def _is_under(path: str, mount_point: str) -> bool:
+    """True if *path* is *mount_point* or inside it, compared by path component."""
+    if mount_point == "/":
+        return path.startswith("/")
+    return path == mount_point or path.startswith(mount_point.rstrip("/") + "/")
+
+
 def _resolve_device(path: str) -> str | None:
     """Walk /proc/mounts to find the block device that hosts *path*."""
     try:
@@ -36,7 +43,7 @@ def _resolve_device(path: str) -> str | None:
         if len(parts) < 2:
             continue
         device, mount_point = parts[0], parts[1]
-        if not path.startswith(mount_point):
+        if not _is_under(path, mount_point):
             continue
         if len(mount_point) > best_match[0]:
             best_match = (len(mount_point), device)

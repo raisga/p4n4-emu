@@ -75,7 +75,7 @@ The command checks Docker version, Compose version, and cgroup v2. Expected outp
 All checks passed.
 ```
 
-If you want to test ARM64 images (Raspberry Pi profiles) on an x86 host, add the `--arch arm64` flag to install QEMU binfmt support:
+The Raspberry Pi profiles run ARM64 images, so on an x86 host install QEMU binfmt support first (or pass `--native` to `up` to keep host-architecture images and apply only the resource limits):
 
 ```bash
 uv run p4n4-emu setup --arch arm64
@@ -114,7 +114,7 @@ uv run p4n4-emu profile show rpi5
 
 ## 4. Start the Emulated Stack
 
-Point `--stack-dir` at the directory that contains your `docker-compose.yml` (the p4n4 IoT stack). The emulator generates a Compose overlay and applies it on top.
+Point `--stack-dir` at the directory that contains your compose file (the p4n4 IoT stack). The emulator generates a Compose overlay and applies it on top.
 
 ```bash
 uv run p4n4-emu up \
@@ -141,8 +141,9 @@ What each flag does:
 |---|---|
 | `--profile rpi5` | Apply Raspberry Pi 5 CPU/memory/disk constraints |
 | `--stack iot` | Target the IoT stack (MQTT, InfluxDB, Node-RED, Grafana); accepts comma-separated names or `all`; defaults to the project's enabled stacks |
-| `--stack-dir` | Path to the directory with the base `docker-compose.yml` (not needed inside a p4n4 project) |
-| `--sim` | Also start the sensor simulator container |
+| `--stack-dir` | Path to the directory with the stack's compose file (not needed inside a p4n4 project) |
+| `--native` | Run host-architecture images; apply only the resource limits |
+| `--sim` | Also start the sensor simulator container (`--sim-interval`, `--sim-devices` tune it) |
 
 Use `--dry-run` to preview the generated overlay without starting anything:
 
@@ -162,13 +163,16 @@ services:
         limits:
           cpus: "0.40"
           memory: "358m"
+    memswap_limit: "358m"
+
   influxdb:
     platform: linux/arm64
     deploy:
       resources:
         limits:
           cpus: "1.60"
-          memory: "2867m"
+          memory: "2508m"
+    memswap_limit: "2508m"
   ...
 Dry run — no containers started.
 ```
@@ -205,17 +209,17 @@ docker exec -it iot-mqtt-1 mosquitto_sub -t 'sensors/#' -v
 Expected output (one line every 2 seconds):
 
 ```
-sensors/temperature {"value": 23.4, "unit": "C", "device": "emu-sensor-0"}
-sensors/humidity    {"value": 58.2, "unit": "%", "device": "emu-sensor-0"}
-sensors/pressure    {"value": 1012.7, "unit": "hPa", "device": "emu-sensor-0"}
-sensors/raw         {"values": [0.01, -0.02, 1.00], "cpu_pct": 42.3, "device": "emu-sensor-0"}
+sensors/emu-sensor-0/temperature {"value": 23.4, "unit": "C"}
+sensors/emu-sensor-0/humidity    {"value": 58.2, "unit": "%"}
+sensors/emu-sensor-0/pressure    {"value": 1012.7, "unit": "hPa"}
+sensors/emu-sensor-0/raw         {"values": [0.01, -0.02, 1.00], "cpu_pct": 42.3}
 ```
 
 ---
 
 ## 6. Simulate LED Toggle from a Sensor Threshold
 
-This script subscribes to the `sensors/temperature` MQTT topic and uses the GPIO stub to toggle a virtual LED (pin 17) whenever the temperature crosses a threshold.
+This script subscribes to the `sensors/emu-sensor-0/temperature` MQTT topic and uses the GPIO stub to toggle a virtual LED (pin 17) whenever the temperature crosses a threshold.
 
 Create the file `led_threshold.py` anywhere on your workstation:
 
@@ -223,7 +227,7 @@ Create the file `led_threshold.py` anywhere on your workstation:
 """
 LED threshold demo — no physical hardware required.
 
-Subscribes to sensors/temperature on the emulated MQTT broker.
+Subscribes to sensors/emu-sensor-0/temperature on the emulated MQTT broker.
 Toggles a simulated GPIO LED (pin 17) based on a temperature threshold.
 """
 
@@ -242,7 +246,7 @@ sys.modules["RPi.GPIO"] = GPIO
 # ── Configuration ─────────────────────────────────────────────────────────────
 MQTT_HOST      = "localhost"
 MQTT_PORT      = 1883
-TOPIC          = "sensors/temperature"
+TOPIC          = "sensors/emu-sensor-0/temperature"
 LED_PIN        = 17          # BCM numbering
 THRESHOLD_C    = 25.0        # °C — LED turns ON above this value
 # ─────────────────────────────────────────────────────────────────────────────
@@ -313,7 +317,7 @@ Sample console output you should see:
 
 ```
 [MQTT] Connected (rc=0)
-[MQTT] Subscribed to 'sensors/temperature'
+[MQTT] Subscribed to 'sensors/emu-sensor-0/temperature'
 [LED ] Pin 17 | Threshold 25.0 °C | initial state: OFF
 
 [HOLD  ] 22.8 °C  ↓ BELOW threshold   LED OFF

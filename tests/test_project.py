@@ -117,3 +117,10 @@ def test_resolve_bare_checkout_fallbacks(tmp_path):
     (tmp_path / "iot" / "docker-compose.yml").touch()
     assert resolve_stack_dir(None, "iot", tmp_path) == tmp_path / "iot"
     assert resolve_stack_dir(None, "ai", tmp_path) is None
+
+
+def test_resolve_accepts_compose_yaml(tmp_path):
+    # compose.yaml is Compose's preferred name; p4n4 must not require docker-compose.yml
+    (tmp_path / "iot").mkdir()
+    (tmp_path / "iot" / "compose.yaml").touch()
+    assert resolve_stack_dir(None, "iot", tmp_path) == tmp_path / "iot"

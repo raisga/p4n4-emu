@@ -3,10 +3,25 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
+import yaml
+
+from p4n4_emu.utils.project import find_compose_file
+
 _COMPOSE_NETWORK_LABEL = "com.docker.compose.network"
+
+# Override names in the order Docker Compose looks for them. Compose only loads
+# one automatically when no -f is given, so passing the emu overlay with -f
+# would silently drop it unless it is listed explicitly.
+_OVERRIDE_FILES = (
+    "compose.override.yml",
+    "compose.override.yaml",
+    "docker-compose.override.yml",
+    "docker-compose.override.yaml",
+)
 
 
 def ensure_network(name: str) -> None:
@@ -74,18 +89,85 @@ def ensure_network(name: str) -> None:
         )
 
 
+def _compose_file_env(cwd: Path) -> str | None:
+    """COMPOSE_FILE from the environment, else from the project's .env file."""
+    if os.environ.get("COMPOSE_FILE"):
+        return os.environ["COMPOSE_FILE"]
+    try:
+        lines = (cwd / ".env").read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        key, sep, value = line.strip().partition("=")
+        if sep and key.strip() == "COMPOSE_FILE":
+            return value.strip().strip("\"'") or None
+    return None
+
+
+def compose_files(cwd: Path) -> list[Path]:
+    """Compose files Docker Compose would load in *cwd* when run without -f."""
+    env_files = _compose_file_env(cwd)
+    if env_files:
+        sep = os.environ.get("COMPOSE_PATH_SEPARATOR", os.pathsep)
+        return [cwd / f for f in env_files.split(sep) if f]
+
+    base = find_compose_file(cwd)
+    if base is None:
+        return []
+    files = [base]
+    for name in _OVERRIDE_FILES:
+        if (cwd / name).exists():
+            files.append(cwd / name)
+            break
+    return files
+
+
+def compose_cmd(cwd: Path, overlay: Path | None = None) -> list[str]:
+    """`docker compose` with the project's files plus the optional emu overlay."""
+    cmd = ["docker", "compose"]
+    for f in compose_files(cwd):
+        cmd += ["-f", str(f)]
+    if overlay is not None:
+        cmd += ["-f", str(overlay)]
+    return cmd
+
+
+def list_services(cwd: Path) -> list[str] | None:
+    """Service names in the project's compose config, or None if unreadable.
+
+    Asks `docker compose config` first so profiles, includes and extends are
+    resolved; falls back to reading the YAML files directly.
+    """
+    r = subprocess.run(
+        [*compose_cmd(cwd), "config", "--services"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if r.returncode == 0:
+        return [line.strip() for line in r.stdout.splitlines() if line.strip()]
+
+    files = compose_files(cwd)
+    if not files:
+        return None
+    services: dict[str, None] = {}
+    for f in files:
+        try:
+            doc = yaml.safe_load(f.read_text()) or {}
+        except (OSError, yaml.YAMLError):
+            return None
+        services.update(dict.fromkeys(doc.get("services") or {}))
+    return list(services)
+
+
 def _base(
     args: list[str],
     cwd: Path,
     *,
     overlay: Path | None = None,
-    stream: bool = True,
 ) -> int:
-    cmd = ["docker", "compose", "-f", "docker-compose.yml"]
-    if overlay is not None:
-        cmd += ["-f", str(overlay)]
-    cmd += args
-    result = subprocess.run(cmd, cwd=cwd, check=False)
+    result = subprocess.run([*compose_cmd(cwd, overlay), *args], cwd=cwd, check=False)
     return result.returncode
 
 
@@ -107,10 +189,7 @@ def down(cwd: Path, overlay: Path | None = None, volumes: bool = False) -> int:
 
 
 def ps(cwd: Path, overlay: Path | None = None) -> list[dict]:
-    cmd = ["docker", "compose", "-f", "docker-compose.yml"]
-    if overlay is not None:
-        cmd += ["-f", str(overlay)]
-    cmd += ["ps", "--format", "json"]
+    cmd = [*compose_cmd(cwd, overlay), "ps", "--format", "json"]
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
     services = []
     for line in result.stdout.splitlines():

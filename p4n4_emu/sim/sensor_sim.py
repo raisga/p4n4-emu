@@ -15,7 +15,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
+import signal
+import threading
 
 import paho.mqtt.client as mqtt
 
@@ -36,19 +37,31 @@ def _publish_device(client: mqtt.Client, device_id: str, gens: dict) -> None:
     accel = next(gens["accel"])
     cpu = next(gens["cpu"])
 
-    def pub(topic: str, payload: dict) -> None:
-        payload["device"] = device_id
-        client.publish(topic, json.dumps(payload))
+    def pub(measurement: str, payload: dict) -> None:
+        # Topic convention: sensors/<device-id>/<measurement>
+        client.publish(f"sensors/{device_id}/{measurement}", json.dumps(payload))
 
-    pub("sensors/temperature", {"value": temp, "unit": "C"})
-    pub("sensors/humidity", {"value": humi, "unit": "%"})
-    pub("sensors/pressure", {"value": pres, "unit": "hPa"})
-    pub("sensors/raw", {"values": list(accel), "cpu_pct": cpu})
+    pub("temperature", {"value": temp, "unit": "C"})
+    pub("humidity", {"value": humi, "unit": "%"})
+    pub("pressure", {"value": pres, "unit": "hPa"})
+    pub("raw", {"values": list(accel), "cpu_pct": cpu})
     _log.debug("%s: temp=%.1f humi=%.1f pres=%.1f", device_id, temp, humi, pres)
 
 
-def run(host: str = MQTT_HOST, port: int = MQTT_PORT, interval: float = INTERVAL) -> None:
+def run(
+    host: str = MQTT_HOST,
+    port: int = MQTT_PORT,
+    interval: float = INTERVAL,
+    stop: threading.Event | None = None,
+) -> None:
+    """Publish readings every *interval* seconds until *stop* is set or SIGTERM/SIGINT."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    stop = stop or threading.Event()
+
+    # `docker stop` sends SIGTERM to PID 1, which ignores it without a handler
+    in_main_thread = threading.current_thread() is threading.main_thread()
+    if in_main_thread:
+        previous_handler = signal.signal(signal.SIGTERM, lambda *_: stop.set())
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.connect(host, port, keepalive=60)
@@ -70,15 +83,17 @@ def run(host: str = MQTT_HOST, port: int = MQTT_PORT, interval: float = INTERVAL
         DEVICE_COUNT, host, port, interval,
     )
     try:
-        while True:
+        while not stop.is_set():
             for dg in device_gens:
                 _publish_device(client, dg["id"], dg)
-            time.sleep(interval)
+            stop.wait(interval)
     except KeyboardInterrupt:
         pass
     finally:
         client.loop_stop()
         client.disconnect()
+        if in_main_thread:
+            signal.signal(signal.SIGTERM, previous_handler)
         _log.info("Sensor sim stopped.")
 
 

@@ -36,13 +36,20 @@ class Profile:
     blkio_write_bps: int
     arch: str = "x86_64"
     _memory_bytes: int = field(default=0, init=False, repr=False)
+    _memory_swap_bytes: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._memory_bytes = _parse_bytes(self.memory)
+        self._memory_swap_bytes = _parse_bytes(self.memory_swap)
 
     @property
     def memory_bytes(self) -> int:
         return self._memory_bytes
+
+    @property
+    def memory_swap_bytes(self) -> int:
+        """Memory plus swap, as Docker's memswap_limit counts it."""
+        return self._memory_swap_bytes
 
     @property
     def memory_mb(self) -> int:

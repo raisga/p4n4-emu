@@ -18,8 +18,18 @@ import json
 from pathlib import Path
 
 MANIFEST_FILE = ".p4n4.json"
-COMPOSE_FILE = "docker-compose.yml"
+# Base file names in the order Docker Compose looks for them
+COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
 STACKS = ("iot", "ai", "edge")
+
+
+def find_compose_file(directory: Path) -> Path | None:
+    """The compose file Docker Compose would pick in *directory*, or None."""
+    for name in COMPOSE_FILES:
+        candidate = directory / name
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def find_manifest(start: Path | None = None) -> Path | None:
@@ -60,10 +70,10 @@ def expand_stacks(stack: str | None, start: Path | None = None) -> list[str]:
 
 
 def resolve_stack_dir(base: Path | None, stack: str, start: Path | None = None) -> Path | None:
-    """Directory holding the given stack's docker-compose.yml, or None."""
+    """Directory holding the given stack's compose file, or None."""
     if base is not None:
         for candidate in (base / stack, base):
-            if (candidate / COMPOSE_FILE).exists():
+            if find_compose_file(candidate):
                 return candidate
         return None
 
@@ -73,15 +83,15 @@ def resolve_stack_dir(base: Path | None, stack: str, start: Path | None = None) 
         layers = manifest_layers(manifest)
         if stack not in layers:
             return None
-        if (root / COMPOSE_FILE).exists():
+        if find_compose_file(root):
             # Flat single-layer layout: the root compose belongs to the first
             # enabled layer only (mirrors p4n4_lib.layout.compose_dirs)
             return root if stack == layers[0] else None
         layer_dir = root / stack
-        return layer_dir if (layer_dir / COMPOSE_FILE).exists() else None
+        return layer_dir if find_compose_file(layer_dir) else None
 
     cwd = (start or Path.cwd()).resolve()
     for candidate in (cwd / stack, cwd, cwd.parent / "docker" / stack):
-        if (candidate / COMPOSE_FILE).exists():
+        if find_compose_file(candidate):
             return candidate
     return None

@@ -60,3 +60,50 @@ def test_sensor_payload_json_serialisable():
     assert parsed["device"] == "emu-sensor-0"
     assert isinstance(parsed["accel"], list)
     assert len(parsed["accel"]) == 3
+
+
+def test_sensor_sim_publishes_spec_topics():
+    from unittest.mock import MagicMock
+
+    from p4n4_emu.sim import sensor_sim
+
+    client = MagicMock()
+    gens = {
+        "temp": generators.temperature_c(),
+        "humi": generators.humidity_pct(),
+        "pres": generators.pressure_hpa(),
+        "accel": generators.accelerometer_xyz(),
+        "cpu": generators.cpu_load_pct(),
+    }
+    sensor_sim._publish_device(client, "emu-sensor-0", gens)
+
+    topics = [c.args[0] for c in client.publish.call_args_list]
+    assert topics == [
+        "sensors/emu-sensor-0/temperature",
+        "sensors/emu-sensor-0/humidity",
+        "sensors/emu-sensor-0/pressure",
+        "sensors/emu-sensor-0/raw",
+    ]
+    raw = json.loads(client.publish.call_args_list[3].args[1])
+    assert len(raw["values"]) == 3
+
+
+def test_sensor_sim_stops_cleanly_on_sigterm(monkeypatch):
+    import os
+    import signal
+    from unittest.mock import MagicMock
+
+    from p4n4_emu.sim import sensor_sim
+
+    client = MagicMock()
+    monkeypatch.setattr(sensor_sim.mqtt, "Client", lambda *a, **k: client)
+    # `docker stop` delivers SIGTERM while the loop is publishing
+    monkeypatch.setattr(
+        sensor_sim, "_publish_device", lambda *a: os.kill(os.getpid(), signal.SIGTERM)
+    )
+    before = signal.getsignal(signal.SIGTERM)
+
+    sensor_sim.run(interval=60)  # would block for a minute if SIGTERM were ignored
+
+    client.disconnect.assert_called_once()
+    assert signal.getsignal(signal.SIGTERM) is before

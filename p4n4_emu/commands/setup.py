@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 from typing import Annotated
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from p4n4_emu.utils.preflight import run_preflight
+from p4n4_emu.overlays.generator import docker_platform
+from p4n4_emu.utils.preflight import needs_qemu, qemu_handler, run_preflight
 
 console = Console()
 
@@ -18,7 +18,7 @@ console = Console()
 def cmd(
     arch: Annotated[
         str,
-        typer.Option("--arch", help="Enable architecture emulation (e.g. arm64)."),
+        typer.Option("--arch", help="Enable architecture emulation (e.g. arm64, armv7)."),
     ] = "",
     check_only: Annotated[
         bool,
@@ -26,9 +26,16 @@ def cmd(
     ] = False,
 ) -> None:
     """Verify the environment and optionally install QEMU binfmt support."""
-    require_qemu = arch.lower() in ("arm64", "aarch64")
+    try:
+        platform = docker_platform(arch) if arch else None
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+    if platform and not needs_qemu(platform):
+        console.print(f"[dim]{platform} is native on this host — no emulation needed.[/dim]")
+    require_qemu = needs_qemu(platform)
 
-    issues = run_preflight(require_qemu=require_qemu)
+    issues = run_preflight(require_qemu=require_qemu, platform=platform or "linux/arm64")
     warnings = [e for e in issues if e.startswith("WARNING")]
     errors = [e for e in issues if not e.startswith("WARNING")]
 
@@ -46,7 +53,7 @@ def cmd(
     ]
     if require_qemu:
         qemu_ok = not any("QEMU" in e for e in errors)
-        checks.append(("QEMU ARM64 binfmt", qemu_ok))
+        checks.append((f"QEMU binfmt ({platform})", qemu_ok))
 
     for name, passed in checks:
         status = "[green]OK[/green]" if passed else "[red]FAIL[/red]"
@@ -60,30 +67,42 @@ def cmd(
     for e in errors:
         console.print(f"[red]Error:[/red] {e}")
 
-    if errors and not require_qemu:
+    # A missing QEMU handler is what the install below fixes; anything else
+    # (no Docker, old Compose) would make the install fail too.
+    hard_errors = [e for e in errors if "QEMU" not in e]
+    if hard_errors:
         raise typer.Exit(1)
 
-    if require_qemu and not check_only:
-        _install_binfmt()
+    if not require_qemu:
+        return
+    if check_only:
+        if errors:
+            raise typer.Exit(1)
+        return
+    _install_binfmt(platform)
 
 
-def _install_binfmt() -> None:
-    binfmt = Path("/proc/sys/fs/binfmt_misc/qemu-aarch64")
+def _install_binfmt(platform: str) -> None:
+    binfmt, install_name = qemu_handler(platform)
     if binfmt.exists():
-        console.print("[green]QEMU ARM64 binfmt already registered.[/green]")
+        console.print(f"[green]QEMU binfmt for {platform} already registered.[/green]")
         return
 
-    console.print("[cyan]Installing QEMU ARM64 binfmt...[/cyan]")
+    console.print(f"[cyan]Installing QEMU binfmt for {platform}...[/cyan]")
     rc = subprocess.run(
         [
             "docker", "run", "--privileged", "--rm",
-            "tonistiigi/binfmt", "--install", "arm64",
+            "tonistiigi/binfmt", "--install", install_name,
         ],
         check=False,
     ).returncode
 
     if rc == 0:
-        console.print("[green]QEMU ARM64 binfmt installed successfully.[/green]")
+        console.print(f"[green]QEMU binfmt for {platform} installed successfully.[/green]")
     else:
-        console.print("[red]Failed to install QEMU binfmt. Try running with sudo.[/red]")
+        console.print(
+            "[red]Failed to install QEMU binfmt.[/red] The installer runs as a privileged "
+            "container: check that your Docker daemon allows `docker run --privileged` "
+            "(rootless Docker and some Docker Desktop setups do not)."
+        )
         raise typer.Exit(1)
