@@ -7,8 +7,11 @@ import yaml
 from typer.testing import CliRunner
 
 from p4n4_emu.cli import app
-from p4n4_emu.commands import down, setup, sim, up
-from p4n4_emu.utils import preflight
+from p4n4_emu.commands import down, logs, setup, sim, status, up
+from p4n4_emu.overlays import paths
+from p4n4_emu.overlays.generator import render_overlay
+from p4n4_emu.profiles.loader import load_profile
+from p4n4_emu.utils import preflight, usage
 
 runner = CliRunner()
 
@@ -19,7 +22,7 @@ def stack_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("COMPOSE_FILE", raising=False)
     (tmp_path / "docker-compose.yml").write_text("services:\n  mqtt: {}\n  influxdb: {}\n")
-    monkeypatch.setattr(up, "_OVERLAY_ROOT", tmp_path / "overlays")
+    monkeypatch.setattr(paths, "OVERLAY_ROOT", tmp_path / "overlays")
     monkeypatch.setattr(up, "detect_block_device", lambda: None)
     monkeypatch.setattr(up.dc, "list_services", lambda cwd: ["mqtt", "influxdb"])
     monkeypatch.setattr(up.dc, "up", lambda cwd, overlay=None: 0)
@@ -35,7 +38,9 @@ def preflight_calls(monkeypatch):
 
 
 def _overlay(stack_dir, profile="rpi5"):
-    return yaml.safe_load((stack_dir / "overlays" / profile / "iot.emu.yml").read_text())
+    doc = yaml.safe_load(paths.overlay_path(stack_dir, "iot").read_text())
+    assert doc["x-p4n4-emu"]["profile"] == profile
+    return doc
 
 
 # ── up: platform and QEMU preflight ───────────────────────────────────────────
@@ -141,6 +146,7 @@ def down_calls(tmp_path, monkeypatch):
     for stack in ("iot", "ai"):
         (tmp_path / stack).mkdir()
         (tmp_path / stack / "docker-compose.yml").touch()
+    monkeypatch.setattr(paths, "OVERLAY_ROOT", tmp_path / "overlays")
     monkeypatch.setattr(down.dc, "down", lambda cwd, overlay=None, volumes=False: 0)
     calls = []
     monkeypatch.setattr(
@@ -159,6 +165,195 @@ def test_down_iot_removes_simulator(down_calls):
     result = runner.invoke(app, ["down", "--stack", "iot"])
     assert result.exit_code == 0, result.output
     assert down_calls == [["docker", "rm", "-f", "p4n4-sensor-sim"]]
+
+
+def _write_overlay(stack_dir, stack="iot", profile="rpi5", services=("mqtt",)):
+    path = paths.overlay_path(stack_dir, stack)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_overlay(load_profile(profile), stack, None, services=list(services)))
+    return path
+
+
+def test_down_removes_the_overlay_without_profile(down_calls, tmp_path, monkeypatch):
+    overlay = _write_overlay(tmp_path / "iot", profile="nuc")
+    used = []
+    monkeypatch.setattr(
+        down.dc, "down", lambda cwd, overlay=None, volumes=False: used.append(overlay) or 0
+    )
+    result = runner.invoke(app, ["down", "--stack", "iot"])
+    assert result.exit_code == 0, result.output
+    assert used == [overlay]
+    assert not overlay.exists()
+
+
+def test_down_keeps_the_overlay_when_compose_fails(down_calls, tmp_path, monkeypatch):
+    overlay = _write_overlay(tmp_path / "iot")
+    monkeypatch.setattr(down.dc, "down", lambda cwd, overlay=None, volumes=False: 1)
+    runner.invoke(app, ["down", "--stack", "iot"])
+    assert overlay.exists()
+
+
+def test_down_still_accepts_profile(down_calls):
+    result = runner.invoke(app, ["down", "--stack", "ai", "--profile", "rpi5"])
+    assert result.exit_code == 0, result.output
+
+
+def test_up_in_two_projects_writes_two_overlays(tmp_path, monkeypatch, preflight_calls):
+    monkeypatch.setattr(paths, "OVERLAY_ROOT", tmp_path / "overlays")
+    monkeypatch.setattr(up, "detect_block_device", lambda: None)
+    monkeypatch.setattr(up.dc, "list_services", lambda cwd: ["mqtt"])
+    monkeypatch.setattr(up.dc, "up", lambda cwd, overlay=None: 0)
+    for project, profile in (("a", "rpi5"), ("b", "nuc")):
+        (tmp_path / project).mkdir()
+        (tmp_path / project / "docker-compose.yml").write_text("services:\n  mqtt: {}\n")
+        result = runner.invoke(
+            app, ["up", "--native", "--profile", profile, "--stack-dir", str(tmp_path / project)]
+        )
+        assert result.exit_code == 0, result.output
+    assert paths.active_profile(tmp_path / "a", "iot") == "rpi5"
+    assert paths.active_profile(tmp_path / "b", "iot") == "nuc"
+
+
+# ── status ────────────────────────────────────────────────────────────────────
+
+_MQTT = {"Service": "mqtt", "Name": "p4n4-mqtt", "State": "running", "Health": "healthy"}
+
+
+@pytest.fixture
+def status_env(tmp_path, monkeypatch):
+    """An iot stack whose containers, limits and usage the test sets."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(paths, "OVERLAY_ROOT", tmp_path / "overlays")
+    (tmp_path / "iot").mkdir()
+    (tmp_path / "iot" / "docker-compose.yml").touch()
+    monkeypatch.setattr(status, "detect_block_device", lambda: None)
+    monkeypatch.setattr(status, "cgroup_v2", lambda: True)
+    env = {"ps": [_MQTT], "applied": {}, "usage": {}}
+    monkeypatch.setattr(status.dc, "ps", lambda cwd, overlay=None: env["ps"])
+    monkeypatch.setattr(status, "applied_limits", lambda names: env["applied"])
+    monkeypatch.setattr(status, "live_usage", lambda names: env["usage"])
+    return env
+
+
+def _status(*args):
+    # Wide enough that rich doesn't wrap the cells the tests look for
+    return runner.invoke(app, ["status", "--stack", "iot", *args], env={"COLUMNS": "200"})
+
+
+def test_status_reads_the_profile_from_the_overlay(status_env, tmp_path):
+    _write_overlay(tmp_path / "iot", profile="nuc")
+    result = _status()
+    assert result.exit_code == 0, result.output
+    assert "Profile: nuc" in result.output
+    assert "iot stack — nuc" in result.output
+
+
+def test_status_shows_usage_against_applied_limits(status_env, tmp_path):
+    overlay = _write_overlay(tmp_path / "iot")
+    status_env["applied"] = {
+        "p4n4-mqtt": usage.expected_limits(yaml.safe_load(overlay.read_text()))["mqtt"]
+    }
+    status_env["usage"] = {"p4n4-mqtt": usage.Usage(cpus=0.12, memory=40 * 1024**2)}
+    result = _status()
+    assert result.exit_code == 0, result.output
+    assert "0.12 / 0.40" in result.output
+    assert "40.0 MiB / 358 MiB" in result.output
+    assert "applied" in result.output
+    assert "stale" not in result.output
+
+
+def test_status_flags_stale_limits(status_env, tmp_path):
+    _write_overlay(tmp_path / "iot")
+    status_env["applied"] = {"p4n4-mqtt": usage.Limits(cpus=1.0)}
+    result = _status()
+    assert "stale" in result.output
+    assert "cpus 1.00 ≠ 0.40" in result.output
+    assert "p4n4-emu up" in result.output
+
+
+def test_status_flags_services_missing_from_the_overlay(status_env, tmp_path):
+    _write_overlay(tmp_path / "iot", services=("influxdb",))
+    result = _status()
+    assert "not in overlay" in result.output
+
+
+def test_status_without_overlay(status_env):
+    result = _status()
+    assert result.exit_code == 0, result.output
+    assert "No stack is running under p4n4-emu" in result.output
+    assert "not under p4n4-emu" in result.output
+    assert "Profile:" not in result.output
+
+
+def test_status_profile_option_warns_on_mismatch(status_env, tmp_path):
+    _write_overlay(tmp_path / "iot", profile="nuc")
+    result = _status("--profile", "rpi5")
+    assert "Profile: rpi5" in result.output
+    assert "runs under nuc, not rpi5" in result.output
+
+
+def test_status_warns_when_cgroup_v2_is_missing(status_env, tmp_path, monkeypatch):
+    _write_overlay(tmp_path / "iot")
+    monkeypatch.setattr(status, "cgroup_v2", lambda: False)
+    assert "doesn't enforce them" in _status().output
+
+
+# ── logs ──────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def logs_calls(tmp_path, monkeypatch):
+    """A multi-layer project (iot + ai), with `docker compose logs` recorded."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(paths, "OVERLAY_ROOT", tmp_path / "overlays")
+    (tmp_path / ".p4n4.json").write_text('{"schema_version": 1, "layers": ["iot", "ai"]}')
+    services = {"iot": ["mqtt", "grafana"], "ai": ["ollama"]}
+    for stack in services:
+        (tmp_path / stack).mkdir()
+        (tmp_path / stack / "docker-compose.yml").touch()
+    monkeypatch.setattr(logs.dc, "list_services", lambda cwd: services[cwd.name])
+    calls = []
+    monkeypatch.setattr(
+        logs.dc, "logs", lambda cwd, **kw: calls.append((cwd.name, kw)) or 0
+    )
+    return calls
+
+
+def test_logs_follows_the_stack_that_defines_the_service(logs_calls):
+    result = runner.invoke(app, ["logs", "ollama"])
+    assert result.exit_code == 0, result.output
+    assert logs_calls == [
+        ("ai", {"overlay": None, "service": "ollama", "tail": 100, "follow": True}),
+    ]
+
+
+def test_logs_refuses_to_follow_several_stacks(logs_calls):
+    result = runner.invoke(app, ["logs"])
+    assert result.exit_code == 1
+    assert "--no-follow" in result.output
+    assert logs_calls == []
+
+
+def test_logs_no_follow_prints_every_stack(logs_calls):
+    result = runner.invoke(app, ["logs", "--no-follow", "--tail", "5"])
+    assert result.exit_code == 0, result.output
+    assert [(s, kw["follow"], kw["tail"]) for s, kw in logs_calls] == [
+        ("iot", False, 5), ("ai", False, 5),
+    ]
+
+
+def test_logs_passes_the_overlay_up_wrote(logs_calls, tmp_path):
+    overlay = paths.overlay_path(tmp_path / "iot", "iot")
+    overlay.parent.mkdir(parents=True)
+    overlay.touch()
+    result = runner.invoke(app, ["logs", "--stack", "iot"])
+    assert result.exit_code == 0, result.output
+    assert logs_calls[0][1]["overlay"] == overlay
+
+
+def test_logs_unknown_service(logs_calls):
+    result = runner.invoke(app, ["logs", "nope"])
+    assert result.exit_code == 1
+    assert "nope" in result.output
 
 
 # ── setup ─────────────────────────────────────────────────────────────────────

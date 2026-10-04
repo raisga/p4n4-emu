@@ -132,7 +132,14 @@ def test_overlay_limits_unknown_services_with_fallback_share(rpi5):
 
 
 def test_overlay_with_no_services_is_valid(rpi5):
-    assert _parse(render_overlay(rpi5, "iot", None, services=[])) == {"services": {}}
+    assert _parse(render_overlay(rpi5, "iot", None, services=[]))["services"] == {}
+
+
+def test_overlay_records_profile_and_platform(rpi5):
+    doc = _parse(render_overlay(rpi5, "iot", None, services=["mqtt"]))
+    assert doc["x-p4n4-emu"] == {"profile": "rpi5", "stack": "iot", "platform": "linux/arm64"}
+    native = _parse(render_overlay(rpi5, "iot", None, services=["mqtt"], platform=None))
+    assert native["x-p4n4-emu"] == {"profile": "rpi5", "stack": "iot"}
 
 
 # ── Platform ──────────────────────────────────────────────────────────────────
@@ -185,10 +192,18 @@ def _total(docs: list[dict], key: str) -> float:
 
 
 def test_budget_keeps_all_stacks_within_one_device(rpi5):
-    scale = budget_scale(service_shares(s) for s in ("iot", "ai", "edge"))
-    docs = [_parse(render_overlay(rpi5, s, None, scale=scale)) for s in ("iot", "ai", "edge")]
+    stacks = ("iot", "ai", "edge", "dashboard")
+    scale = budget_scale(service_shares(s) for s in stacks)
+    docs = [_parse(render_overlay(rpi5, s, None, scale=scale)) for s in stacks]
     assert _total(docs, "cpus") <= rpi5.cpus + 0.05  # rounding to 2 decimals
     assert _total(docs, "memory") <= rpi5.memory_mb
+
+
+def test_dashboard_gets_a_small_limit(rpi5):
+    doc = _parse(render_overlay(rpi5, "dashboard", None))
+    limits = doc["services"]["dashboard"]["deploy"]["resources"]["limits"]
+    assert float(limits["memory"][:-1]) <= 128
+    assert float(limits["cpus"]) <= 0.25
 
 
 def test_budget_never_scales_up():

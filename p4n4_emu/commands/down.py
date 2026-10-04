@@ -9,18 +9,23 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
+from p4n4_emu.overlays.paths import existing_overlay, remove_overlay
 from p4n4_emu.utils import compose as dc
 from p4n4_emu.utils.project import expand_stacks, resolve_stack_dir
 
 console = Console()
 
-_OVERLAY_ROOT = Path.home() / ".p4n4-emu" / "overlays"
-
 
 def cmd(
     profile: Annotated[
-        str, typer.Option("--profile", "-p", help="Profile name (used to locate overlay).")
-    ] = "rpi5",
+        str | None,
+        typer.Option(
+            "--profile",
+            "-p",
+            hidden=True,
+            help="Ignored: the overlay `up` wrote records the profile.",
+        ),
+    ] = None,
     stack: Annotated[
         str | None,
         typer.Option(
@@ -59,13 +64,15 @@ def cmd(
             )
             continue
 
-        overlay_file = _OVERLAY_ROOT / profile / f"{s}.emu.yml"
-        overlay = overlay_file if overlay_file.exists() else None
+        overlay = existing_overlay(cwd, s)
 
         console.print(f"[cyan]Stopping {s} stack...[/cyan]")
         rc = dc.down(cwd, overlay=overlay, volumes=volumes)
         if rc != 0:
             console.print(f"[red]Failed to stop {s} stack (exit {rc}).[/red]")
+            continue
+        # The stack no longer runs under a profile
+        remove_overlay(cwd, s)
 
     # The simulator publishes to the iot broker, so it goes down with iot only
     if "iot" in stacks_to_stop:

@@ -182,7 +182,9 @@ def up(cwd: Path, overlay: Path | None = None, build: bool = False, pull: bool =
 
 
 def down(cwd: Path, overlay: Path | None = None, volumes: bool = False) -> int:
-    args = ["down"]
+    # Stack services sit in Compose profiles, and `down` only stops the ones
+    # in active profiles; enable them all so none is left running
+    args = ["--profile", "*", "down"]
     if volumes:
         args.append("-v")
     return _base(args, cwd, overlay=overlay)

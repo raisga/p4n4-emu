@@ -6,7 +6,7 @@ import typer
 from rich.console import Console
 
 from p4n4_emu import __version__
-from p4n4_emu.commands import down, profile, setup, sim, status, up
+from p4n4_emu.commands import down, logs, profile, setup, sim, status, up
 
 app = typer.Typer(
     name="p4n4-emu",
@@ -25,6 +25,7 @@ app.command("setup")(setup.cmd)
 app.command("up")(up.cmd)
 app.command("down")(down.cmd)
 app.command("status")(status.cmd)
+app.command("logs")(logs.cmd)
 
 
 def _version_callback(value: bool) -> None:

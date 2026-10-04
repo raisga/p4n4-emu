@@ -63,7 +63,7 @@ def test_expand_default_uses_project_layers(tmp_path):
 
 def test_expand_default_without_project(tmp_path):
     assert expand_stacks(None, tmp_path) == ["iot"]
-    assert expand_stacks("all", tmp_path) == ["iot", "ai", "edge"]
+    assert expand_stacks("all", tmp_path) == ["iot", "ai", "edge", "dashboard"]
 
 
 def test_expand_explicit_and_comma_separated(tmp_path):

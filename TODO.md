@@ -16,12 +16,13 @@ emulation · **P2** quality-of-life · **P3** stretch.
 
 ## 0. Housekeeping (do first)
 
-- [ ] Commit the working-tree change that moves the simulator to the spec topic scheme
+- [x] Commit the working-tree change that moves the simulator to the spec topic scheme
       (`README.md`, `guide.md`, `sensor_sim.py`, `tests/test_sim.py`) and `.gitattributes`.
       The root `TODO.md` task 6 covers pushing.
-- [ ] Fix the license mismatch: `LICENSE` and the README say MIT, but `pyproject.toml:11`
-      says Apache-2.0.
-- [ ] Fix the install path in `README.md:31` and `README.md:54` (`~/p4n4/demo/emu` → `~/p4n4/tools/emu`).
+- [x] Fix the license mismatch: `pyproject.toml` now says MIT, like `LICENSE` and the README.
+- [x] Fix the install path in the README (`~/p4n4/demo/emu` → `~/p4n4/tools/emu`). The docs
+      now install with `uv tool install --editable .`: `uv run p4n4-emu` only works inside
+      `tools/emu`, not from a p4n4 project.
 - [ ] Replace the mirrored layout logic in `p4n4_emu/utils/project.py` with `p4n4-lib`
       once it is on PyPI (root `TODO.md` task 10).
 
@@ -132,11 +133,13 @@ Line numbers below refer to the code before the fix.
 
 ## 4. Hardware stubs (P1)
 
-- [ ] **`gpio_stub.setup` breaks real scripts.** It takes only `(pin, direction)`
-      (`hw/gpio_stub.py:43`), so `GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)` and
-      `initial=` raise `TypeError`. Accept the full `RPi.GPIO` signature, including pin lists.
-- [ ] Add the missing `RPi.GPIO` API: `PWM`, `add_event_detect` / `remove_event_detect`,
-      `wait_for_edge`, `event_detected`, `BOARD` ↔ `BCM` mapping, `gpio_function`, `RPI_INFO`.
+- [x] **`gpio_stub.setup` breaks real scripts.** It now takes the full `RPi.GPIO` signature
+      (`pull_up_down=`, `initial=`, pin lists). `p4n4_button_handler.py` runs under the stub.
+- [x] Edge detection: `add_event_detect` (with `bouncetime`), `add_event_callback`,
+      `remove_event_detect`, `event_detected`, plus `getmode` and `gpio_function`. Inputs are
+      driven with the stub-only `set_input(pin, level)`.
+- [ ] Add the rest of the `RPi.GPIO` API: `PWM`, `wait_for_edge`, `BOARD` ↔ `BCM` mapping,
+      `RPI_INFO`.
 - [ ] **Pi 5 does not support `RPi.GPIO`.** Add stubs for `gpiozero` (mock pin factory) and
       `lgpio` / `gpiod`, which is what the `rpi5` profile would actually run.
 - [ ] Add an external control channel so tests or a UI can drive input pins: MQTT topic
@@ -153,18 +156,16 @@ Line numbers below refer to the code before the fix.
 
 - [ ] Configurable devices and measurements from a YAML scenario file (count, ids,
       measurement set, ranges, rates per device), replacing the four hardcoded measurements.
-- [ ] Per-device phase / seed. `_wave` (`sim/generators.py:11`) depends only on `time.time()`,
-      so every device emits the same curve.
+- [x] Per-device phase. Each device's curves are shifted by a phase derived from its id.
 - [ ] Fault injection: spikes, stuck values, drift, dropouts, out-of-order and late timestamps,
       malformed payloads. These exercise the Node-RED flows and anomaly detection.
 - [ ] Replay mode from a CSV / InfluxDB export.
 - [ ] Broker auth and TLS (`MQTT_USERNAME` / `MQTT_PASSWORD` / CA). The iot stack ships
       `allow_anonymous true` today, but the hardened config and `acl.example` only let the device
       account write `sensors/iot-device-001/+`, so `emu-sensor-*` ids would be denied.
-- [ ] Reconnect with backoff, and QoS / retain options. `client.connect`
-      (`sim/sensor_sim.py:54`) fails hard if the broker is not up yet.
-- [ ] Read `SIM_DEVICE_COUNT` at call time instead of import time (`sim/sensor_sim.py:29`),
-      so `run()` can be driven from tests and the CLI.
+- [x] Reconnect with backoff (1 s doubling to 30 s), including when the broker is not up yet.
+- [ ] QoS / retain options for the simulator's publishes.
+- [x] Read `SIM_DEVICE_COUNT` (and the other settings) when `run()` is called, not at import.
 - [ ] Optional simulated **camera / audio feed** for the edge runner, so `ei-runner` can be tested
       without a physical sensor.
 - [ ] MCU node emulation: a lightweight "virtual ESP32" container per device, or Renode / Wokwi
@@ -172,13 +173,18 @@ Line numbers below refer to the code before the fix.
 
 ## 6. CLI and UX (P2)
 
-- [ ] Persist the active profile per project (`~/.p4n4-emu/state.json`, keyed by project path)
-      so `down` / `status` need no `--profile`. Overlays are keyed only by
-      `<profile>/<stack>` today, so two projects overwrite each other's files.
-- [ ] Move the duplicated `_OVERLAY_ROOT` (up, down, status) into one module.
-- [ ] `status`: show live usage against limits (`docker stats --no-stream`) and confirm the
-      limits were actually applied (`docker inspect` → `HostConfig.NanoCpus` / `Memory` / `BlkioDevice*`).
-- [ ] Add a `logs` command. `utils/compose.py:131` already has the wrapper, but nothing calls it.
+- [x] Persist the active profile per project, so `down` / `status` / `logs` need no
+      `--profile`. Overlays live in one folder per stack directory
+      (`overlays/<dir>-<hash>/<stack>.emu.yml`) and record their profile in an `x-p4n4-emu`
+      block; `down` deletes them. No separate state file to drift from the overlays.
+- [x] Move the duplicated `_OVERLAY_ROOT` (up, down, status) into one module
+      (`overlays/paths.py`).
+- [x] `status`: show live usage against limits (`docker stats --no-stream`) and confirm the
+      limits were actually applied (`docker inspect` → `HostConfig.NanoCpus` / `Memory` /
+      `MemorySwap` / `BlkioDevice*Bps`). Stale containers are flagged, and a missing cgroup v2
+      gets a warning.
+- [x] Add a `logs` command, with the main CLI's `--tail` / `--no-follow` / `--stack` behaviour.
+      A service name selects the stack that defines it.
 - [ ] `profile switch <name>`: re-apply limits to running containers with `docker update`,
       without recreating them.
 - [ ] Roll back stacks already started when a later stack in `--stack all` fails.
@@ -191,13 +197,13 @@ Line numbers below refer to the code before the fix.
 
 ## 7. Testing and CI (P2)
 
-- [ ] CLI tests with `typer.testing.CliRunner` and mocked `subprocess` for `up`, `down`,
-      `status`, `setup` and `sim`. None exist today.
+- [ ] CLI tests with `typer.testing.CliRunner` and mocked `subprocess`. `up`, `down`, `logs`,
+      `status`, `setup` and `sim` have them (`tests/test_commands.py`); `profile` doesn't.
 - [ ] Overlay tests that render every template against every profile and check the result with
       `docker compose config` against the real stacks in `../../stacks/*`.
 - [ ] Integration job (marked, opt-in) that starts the iot stack under `mcu-class`, runs the simulator,
       and checks that readings land in InfluxDB.
-- [ ] Regression tests for every P0 bug in section 1.
+- [x] Regression tests for every P0 bug in section 1.
 - [ ] GitHub Actions: ruff + pytest on 3.11–3.13. Add arm64 runners or QEMU for the integration job.
 
 ## 8. Packaging and docs (P2)

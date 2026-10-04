@@ -42,6 +42,10 @@ SERVICE_SHARES: dict[str, dict[str, Share]] = {
     "edge": {
         "ei-runner": Share(0.25, 0.10),
     },
+    # nginx serving static files and proxying: a few tens of MB on a Pi
+    "dashboard": {
+        "dashboard": Share(0.05, 0.01),
+    },
 }
 FALLBACK_SHARE = Share(0.10, 0.10)
 
@@ -107,7 +111,7 @@ def render_overlay(
 
     Args:
         profile: loaded hardware profile
-        stack: one of "iot", "ai", "edge"
+        stack: one of "iot", "ai", "edge", "dashboard"
         blkio_device: block device path (e.g. "/dev/sda") or None to skip blkio limits
         services: service names in the stack's compose config; None uses the defaults
         platform: Docker platform to force, None for native, "auto" for the profile's

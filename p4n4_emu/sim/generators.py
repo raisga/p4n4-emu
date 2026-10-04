@@ -8,33 +8,39 @@ import time
 from collections.abc import Iterator
 
 
-def _wave(base: float, amplitude: float, noise: float, period: float = 300.0) -> Iterator[float]:
-    """Sinusoid + Gaussian noise iterator."""
+def _wave(
+    base: float, amplitude: float, noise: float, period: float = 300.0, phase: float = 0.0
+) -> Iterator[float]:
+    """Sinusoid + Gaussian noise iterator.
+
+    *phase* shifts the curve by that fraction of a period (0.0–1.0), so
+    devices sampled at the same moment don't all report the same value.
+    """
     while True:
         t = time.time()
-        value = base + amplitude * math.sin(2 * math.pi * t / period)
+        value = base + amplitude * math.sin(2 * math.pi * (t / period + phase))
         value += random.gauss(0, noise)
         yield round(value, 3)
 
 
 def temperature_c(
-    base: float = 22.0, amplitude: float = 3.0, noise: float = 0.1
+    base: float = 22.0, amplitude: float = 3.0, noise: float = 0.1, phase: float = 0.0
 ) -> Iterator[float]:
-    return _wave(base, amplitude, noise)
+    return _wave(base, amplitude, noise, phase=phase)
 
 
 def humidity_pct(
-    base: float = 55.0, amplitude: float = 10.0, noise: float = 0.5
+    base: float = 55.0, amplitude: float = 10.0, noise: float = 0.5, phase: float = 0.0
 ) -> Iterator[float]:
-    gen = _wave(base, amplitude, noise)
+    gen = _wave(base, amplitude, noise, phase=phase)
     while True:
         yield max(10.0, min(95.0, next(gen)))
 
 
 def pressure_hpa(
-    base: float = 1013.25, amplitude: float = 2.0, noise: float = 0.05
+    base: float = 1013.25, amplitude: float = 2.0, noise: float = 0.05, phase: float = 0.0
 ) -> Iterator[float]:
-    return _wave(base, amplitude, noise)
+    return _wave(base, amplitude, noise, phase=phase)
 
 
 def accelerometer_xyz(
@@ -48,7 +54,9 @@ def accelerometer_xyz(
         yield (x, y, z)
 
 
-def cpu_load_pct(base: float = 45.0, amplitude: float = 20.0) -> Iterator[float]:
-    gen = _wave(base, amplitude, noise=1.0, period=60.0)
+def cpu_load_pct(
+    base: float = 45.0, amplitude: float = 20.0, phase: float = 0.0
+) -> Iterator[float]:
+    gen = _wave(base, amplitude, noise=1.0, period=60.0, phase=phase)
     while True:
         yield max(0.0, min(100.0, next(gen)))

@@ -27,15 +27,20 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```bash
 git clone https://github.com/raisga/p4n4-emu.git
 cd p4n4-emu
-uv sync
+uv tool install --editable .
 ```
 
-`uv sync` creates a virtual environment and installs all Python dependencies from `uv.lock`.
+`uv tool install` installs p4n4-emu and its dependencies in their own environment and puts
+`p4n4-emu` on your `PATH`, so it works from any directory, including your p4n4 projects.
+
+`--editable` keeps the install pointing at this checkout, which `sim` builds its
+image from. To work on p4n4-emu itself, `uv sync` and `uv run p4n4-emu` also work, but
+only inside `tools/emu`: run from a p4n4 project, `uv run` doesn't find the command.
 
 Verify the CLI is available:
 
 ```bash
-uv run p4n4-emu --help
+p4n4-emu --help
 ```
 
 Expected output:
@@ -57,7 +62,7 @@ Expected output:
 ## 2. Run Preflight Checks
 
 ```bash
-uv run p4n4-emu setup
+p4n4-emu setup
 ```
 
 The command checks Docker version, Compose version, and cgroup v2. Expected output:
@@ -78,7 +83,7 @@ All checks passed.
 The Raspberry Pi profiles run ARM64 images, so on an x86 host install QEMU binfmt support first (or pass `--native` to `up` to keep host-architecture images and apply only the resource limits):
 
 ```bash
-uv run p4n4-emu setup --arch arm64
+p4n4-emu setup --arch arm64
 ```
 
 ---
@@ -86,7 +91,7 @@ uv run p4n4-emu setup --arch arm64
 ## 3. Inspect Available Profiles
 
 ```bash
-uv run p4n4-emu profile list
+p4n4-emu profile list
 ```
 
 Expected output:
@@ -107,7 +112,7 @@ Expected output:
 Inspect a specific profile:
 
 ```bash
-uv run p4n4-emu profile show rpi5
+p4n4-emu profile show rpi5
 ```
 
 ---
@@ -117,7 +122,7 @@ uv run p4n4-emu profile show rpi5
 Point `--stack-dir` at the directory that contains your compose file (the p4n4 IoT stack). The emulator generates a Compose overlay and applies it on top.
 
 ```bash
-uv run p4n4-emu up \
+p4n4-emu up \
   --profile rpi5 \
   --stack iot \
   --stack-dir ~/p4n4/stacks/iot \
@@ -132,7 +137,7 @@ enabled stacks, and resolves each stack's directory for either layout — flat
 
 ```bash
 cd ~/projects/my-p4n4-project
-uv run p4n4-emu up --profile rpi5 --sim
+p4n4-emu up --profile rpi5 --sim
 ```
 
 What each flag does:
@@ -148,7 +153,7 @@ What each flag does:
 Use `--dry-run` to preview the generated overlay without starting anything:
 
 ```bash
-uv run p4n4-emu up --dry-run --profile rpi5 --stack iot --stack-dir ~/p4n4/stacks/iot
+p4n4-emu up --dry-run --profile rpi5 --stack iot --stack-dir ~/p4n4/stacks/iot
 ```
 
 Expected output (dry-run):
@@ -182,23 +187,28 @@ Dry run — no containers started.
 ## 5. Verify the Stack is Running
 
 ```bash
-uv run p4n4-emu status --profile rpi5 --stack iot --stack-dir ~/p4n4/stacks/iot
+p4n4-emu status --stack iot --stack-dir ~/p4n4/stacks/iot
 ```
 
-Expected output:
+`status` reads the profile from the overlay `up` wrote, so it needs no `--profile`.
+After the profile summary, it lists each service with its CPU and memory use against
+its limits:
 
 ```
-Profile: rpi5  CPUs: 4  Memory: 7168 MB  Disk R/W: 100 MB/s
-┌─────────────────────────────────────────────────────────────┐
-│ Container              │ Status    │ Health                  │
-├─────────────────────────┼───────────┼─────────────────────────┤
-│ iot-mqtt-1             │ running   │ healthy                 │
-│ iot-influxdb-1         │ running   │ healthy                 │
-│ iot-node-red-1         │ running   │ healthy                 │
-│ iot-grafana-1          │ running   │ healthy                 │
-│ p4n4-sensor-sim        │ running   │ —                       │
-└─────────────────────────┴───────────┴─────────────────────────┘
+                                 iot stack — rpi5
+┏━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━┓
+┃ Service  ┃ Status  ┃ Health  ┃ CPU (cores) ┃            Memory ┃ Limits  ┃ Ports         ┃
+┡━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━┩
+│ grafana  │ running │ healthy │ 0.01 / 0.60 │  98 MiB / 716 MiB │ applied │ 3000→3000/tcp │
+│ influxdb │ running │ healthy │ 0.05 / 1.60 │ 131 MiB / 2.4 GiB │ applied │ 8086→8086/tcp │
+│ mqtt     │ running │ healthy │ 0.00 / 0.40 │ 4.5 MiB / 358 MiB │ applied │ 1883→1883/tcp │
+│ node-red │ running │ healthy │ 0.02 / 1.20 │  87 MiB / 1.0 GiB │ applied │ 1880→1880/tcp │
+└──────────┴─────────┴─────────┴─────────────┴───────────────────┴─────────┴───────────────┘
 ```
+
+Usage at 90% of a limit is highlighted. **stale** in the Limits column means the container
+doesn't have the limits its overlay asks for (it was created before the overlay changed):
+run `p4n4-emu up` again to recreate it.
 
 Check that MQTT messages are flowing:
 
@@ -357,19 +367,19 @@ else:
 Stop the sensor simulator:
 
 ```bash
-uv run p4n4-emu sim stop
+p4n4-emu sim stop
 ```
 
 Stop the emulated stack:
 
 ```bash
-uv run p4n4-emu down --profile rpi5 --stack iot --stack-dir ~/p4n4/stacks/iot
+p4n4-emu down --stack iot --stack-dir ~/p4n4/stacks/iot
 ```
 
 To also remove persistent volumes (InfluxDB data, Grafana dashboards):
 
 ```bash
-uv run p4n4-emu down --profile rpi5 --stack iot --stack-dir ~/p4n4/stacks/iot --volumes
+p4n4-emu down --stack iot --stack-dir ~/p4n4/stacks/iot --volumes
 ```
 
 ---
@@ -378,24 +388,27 @@ uv run p4n4-emu down --profile rpi5 --stack iot --stack-dir ~/p4n4/stacks/iot --
 
 ```
 # First-time setup
-uv sync
-uv run p4n4-emu setup [--arch arm64]
+uv tool install --editable .
+p4n4-emu setup [--arch arm64]
 
 # Inspect profiles
-uv run p4n4-emu profile list
-uv run p4n4-emu profile show <name>
+p4n4-emu profile list
+p4n4-emu profile show <name>
 
 # Start / stop
-uv run p4n4-emu up   --profile <profile> --stack <stack> --stack-dir <path> [--sim]
-uv run p4n4-emu down --profile <profile> --stack <stack> --stack-dir <path> [--volumes]
+p4n4-emu up   --profile <profile> --stack <stack> --stack-dir <path> [--sim]
+p4n4-emu down --stack <stack> --stack-dir <path> [--volumes]
 
 # Status
-uv run p4n4-emu status --profile <profile> --stack <stack> --stack-dir <path>
+p4n4-emu status --stack <stack> --stack-dir <path>
+
+# Logs (one stack when following; --no-follow prints every stack)
+p4n4-emu logs [SERVICE] --stack <stack> [--tail 100] [--no-follow]
 
 # Simulator only
-uv run p4n4-emu sim start [--interval 2.0] [--devices 1] [--mqtt-host p4n4-mqtt]
-uv run p4n4-emu sim stop
-uv run p4n4-emu sim status
+p4n4-emu sim start [--interval 2.0] [--devices 1] [--mqtt-host p4n4-mqtt]
+p4n4-emu sim stop
+p4n4-emu sim status
 
 # LED threshold demo
 uv run python led_threshold.py

@@ -6,6 +6,8 @@ import platform as _platform
 import subprocess
 from pathlib import Path
 
+from p4n4_emu.utils.usage import cgroup_v2
+
 _BINFMT_DIR = Path("/proc/sys/fs/binfmt_misc")
 
 # Docker platform → (binfmt_misc handler, tonistiigi/binfmt --install name)
@@ -77,8 +79,7 @@ def run_preflight(require_qemu: bool = False, platform: str = "linux/arm64") -> 
             errors.append(f"Docker Compose >= 2.17 required; found {out!r}.")
 
     # cgroup v2 — warn only (non-fatal)
-    cgroupv2 = Path("/sys/fs/cgroup/cgroup.controllers")
-    if not cgroupv2.exists():
+    if not cgroup_v2():
         errors.append(
             "WARNING: cgroup v2 not detected. CPU/memory limits may not be enforced. "
             "Check your kernel boot parameters (systemd.unified_cgroup_hierarchy=1)."

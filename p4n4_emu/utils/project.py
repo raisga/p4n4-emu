@@ -20,7 +20,8 @@ from pathlib import Path
 MANIFEST_FILE = ".p4n4.json"
 # Base file names in the order Docker Compose looks for them
 COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
-STACKS = ("iot", "ai", "edge")
+# Dependency order, as in p4n4_lib.layers: the dashboard starts last
+STACKS = ("iot", "ai", "edge", "dashboard")
 
 
 def find_compose_file(directory: Path) -> Path | None:

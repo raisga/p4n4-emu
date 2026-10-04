@@ -18,6 +18,7 @@ from p4n4_emu.overlays.generator import (
     render_overlay,
     service_shares,
 )
+from p4n4_emu.overlays.paths import overlay_path
 from p4n4_emu.profiles.loader import Profile, load_profile
 from p4n4_emu.utils import compose as dc
 from p4n4_emu.utils.docker_info import detect_block_device
@@ -31,15 +32,6 @@ from p4n4_emu.utils.project import (
 )
 
 console = Console()
-
-_OVERLAY_ROOT = Path.home() / ".p4n4-emu" / "overlays"
-
-
-def _overlay_path(profile_name: str, stack: str) -> Path:
-    p = _OVERLAY_ROOT / profile_name / f"{stack}.emu.yml"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
-
 
 def resolve_platform(prof: Profile, arch: str, native: bool) -> str | None:
     """Docker platform to force on every service, or None to run natively.
@@ -163,7 +155,7 @@ def cmd(
             platform=platform,
             scale=scale,
         )
-        overlay_file = _overlay_path(prof.name, s)
+        overlay_file = overlay_path(cwd, s)
 
         if dry_run:
             console.print(f"\n[bold]--- Overlay for {s} ---[/bold]")
@@ -172,6 +164,7 @@ def cmd(
             console.print(f"\n[dim]Would run in {cwd}: {command} up -d[/dim]")
             continue
 
+        overlay_file.parent.mkdir(parents=True, exist_ok=True)
         overlay_file.write_text(overlay_content)
         console.print(f"[cyan]Starting {s} stack[/cyan] with profile [bold]{prof.name}[/bold]…")
         rc = dc.up(cwd, overlay=overlay_file)
