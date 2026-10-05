@@ -90,7 +90,7 @@ Required to run the ARM profiles (`rpi4` / `rpi5`) on an x86 host. `up` runs the
 p4n4-emu setup --arch arm64
 ```
 
-This runs `tonistiigi/binfmt --install arm64` via Docker once per host.
+This runs `tonistiigi/binfmt --install arm64` (pinned to `qemu-v10.2.3` by digest, since it runs privileged) via Docker once per host.
 
 ### 5. Start a stack
 

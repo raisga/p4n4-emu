@@ -8,10 +8,13 @@ import subprocess
 from pathlib import Path
 
 import yaml
+from rich.console import Console
 
 from p4n4_emu.utils.project import find_compose_file
 
 _COMPOSE_NETWORK_LABEL = "com.docker.compose.network"
+# p4n4-iot's subnet for p4n4-net (its docker-compose.yml)
+NETWORK_SUBNET = "172.20.0.0/16"
 
 # Override names in the order Docker Compose looks for them. Compose only loads
 # one automatically when no -f is given, so passing the emu overlay with -f
@@ -24,69 +27,47 @@ _OVERRIDE_FILES = (
 )
 
 
-def ensure_network(name: str) -> None:
-    """Ensure a Docker network exists with the correct Compose label.
+def ensure_network(name: str, subnet: str = NETWORK_SUBNET) -> None:
+    """Ensure the shared network exists with the label Compose gives its own networks.
 
-    Docker Compose warns when a network is found without the expected
-    com.docker.compose.network label (e.g. created via `docker network create`
-    or `docker run --network`).  Re-creating it with the correct label
-    suppresses the warning.
+    p4n4-iot declares the network itself, and Compose 2.19.1 to 5.3.1 refuse a
+    network of that name without the com.docker.compose.network label ("incorrect
+    label"), as `docker network create` makes it. A missing network is created
+    with the label and p4n4-iot's subnet. An unlabelled one is recreated only when
+    no container uses it: recreating it under running stacks would cut them off
+    (their service-name aliases, such as `influxdb`, would stop resolving).
     """
     inspect = subprocess.run(
         ["docker", "network", "inspect", name, "--format",
-         f"{{{{index .Labels \"{_COMPOSE_NETWORK_LABEL}\"}}}}"],
+         f"{{{{index .Labels \"{_COMPOSE_NETWORK_LABEL}\"}}}} {{{{len .Containers}}}}"],
         capture_output=True,
         text=True,
         check=False,
     )
-    if inspect.returncode != 0:
-        # Network doesn't exist — create it with the correct label.
-        subprocess.run(
-            ["docker", "network", "create",
-             "--label", f"{_COMPOSE_NETWORK_LABEL}={name}", name],
-            capture_output=True, check=False,
+    if inspect.returncode == 0:
+        label, _, attached = inspect.stdout.strip().rpartition(" ")
+        if label == name:
+            return  # Label already correct.
+        if attached != "0":
+            Console(stderr=True).print(
+                f"[yellow]Warning:[/yellow] {name} was created without Compose's label, and "
+                f"{attached} container(s) use it, so it's left as it is. If Compose refuses "
+                f"it, stop the stacks, run [bold]docker network rm {name}[/bold] and start "
+                "them again."
+            )
+            return
+        removed = subprocess.run(
+            ["docker", "network", "rm", name], capture_output=True, check=False
         )
-        return
-
-    if inspect.stdout.strip() == name:
-        return  # Label already correct.
-
-    # Label is wrong — force-disconnect any attached containers so rm succeeds,
-    # recreate with the correct label, then reconnect them.
-    containers_r = subprocess.run(
-        ["docker", "network", "inspect", name, "--format",
-         "{{range $id, $_ := .Containers}}{{$id}}\n{{end}}"],
-        capture_output=True, text=True, check=False,
-    )
-    container_ids = [
-        c.strip() for c in containers_r.stdout.splitlines() if c.strip()
-    ]
-
-    for cid in container_ids:
-        subprocess.run(
-            ["docker", "network", "disconnect", "-f", name, cid],
-            capture_output=True, check=False,
-        )
-
-    rm_rc = subprocess.run(
-        ["docker", "network", "rm", name],
-        capture_output=True, check=False,
-    ).returncode
-
-    if rm_rc != 0:
-        return  # Can't fix while network is still in use.
+        if removed.returncode != 0:
+            return  # Compose reports the label problem itself.
 
     subprocess.run(
-        ["docker", "network", "create",
+        ["docker", "network", "create", "--driver", "bridge", "--subnet", subnet,
          "--label", f"{_COMPOSE_NETWORK_LABEL}={name}", name],
-        capture_output=True, check=False,
+        capture_output=True,
+        check=False,
     )
-
-    for cid in container_ids:
-        subprocess.run(
-            ["docker", "network", "connect", name, cid],
-            capture_output=True, check=False,
-        )
 
 
 def _compose_file_env(cwd: Path) -> str | None:

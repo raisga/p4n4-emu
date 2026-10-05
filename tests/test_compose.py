@@ -69,3 +69,57 @@ def test_list_services_falls_back_to_yaml(tmp_path, monkeypatch):
         dc.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="")
     )
     assert dc.list_services(tmp_path) == ["mqtt", "grafana", "telegraf"]
+
+
+def _network_run(calls, inspect_rc=0, inspect_out=""):
+    def run(cmd, **kwargs):
+        calls.append(cmd[:3])
+        if cmd[:3] == ["docker", "network", "inspect"]:
+            return subprocess.CompletedProcess(cmd, inspect_rc, stdout=inspect_out)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    return run
+
+
+def test_ensure_network_creates_a_missing_one_with_label_and_subnet(monkeypatch):
+    created = []
+
+    def run(cmd, **kwargs):
+        if cmd[:3] == ["docker", "network", "inspect"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="")
+        created.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(dc.subprocess, "run", run)
+    dc.ensure_network("p4n4-net")
+    (create,) = created
+    assert create[:3] == ["docker", "network", "create"]
+    assert "com.docker.compose.network=p4n4-net" in create
+    assert create[create.index("--subnet") + 1] == "172.20.0.0/16"
+
+
+def test_ensure_network_keeps_a_labelled_one(monkeypatch):
+    calls = []
+    monkeypatch.setattr(dc.subprocess, "run", _network_run(calls, inspect_out="p4n4-net 3\n"))
+    dc.ensure_network("p4n4-net")
+    assert calls == [["docker", "network", "inspect"]]
+
+
+def test_ensure_network_never_disconnects_running_containers(monkeypatch, capsys):
+    # Recreating the network under running stacks cut them off (lost aliases)
+    calls = []
+    monkeypatch.setattr(dc.subprocess, "run", _network_run(calls, inspect_out=" 2\n"))
+    dc.ensure_network("p4n4-net")
+    assert calls == [["docker", "network", "inspect"]]
+    assert "docker network rm p4n4-net" in " ".join(capsys.readouterr().err.split())
+
+
+def test_ensure_network_recreates_an_unused_unlabelled_one(monkeypatch):
+    calls = []
+    monkeypatch.setattr(dc.subprocess, "run", _network_run(calls, inspect_out=" 0\n"))
+    dc.ensure_network("p4n4-net")
+    assert calls == [
+        ["docker", "network", "inspect"],
+        ["docker", "network", "rm"],
+        ["docker", "network", "create"],
+    ]

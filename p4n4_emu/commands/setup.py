@@ -82,6 +82,14 @@ def cmd(
     _install_binfmt(platform)
 
 
+# Runs privileged, so pinned to a tag and its digest (tonistiigi/binfmt:latest
+# on 2026-10-04)
+BINFMT_IMAGE = (
+    "tonistiigi/binfmt:qemu-v10.2.3"
+    "@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0"
+)
+
+
 def _install_binfmt(platform: str) -> None:
     binfmt, install_name = qemu_handler(platform)
     if binfmt.exists():
@@ -92,7 +100,7 @@ def _install_binfmt(platform: str) -> None:
     rc = subprocess.run(
         [
             "docker", "run", "--privileged", "--rm",
-            "tonistiigi/binfmt", "--install", install_name,
+            BINFMT_IMAGE, "--install", install_name,
         ],
         check=False,
     ).returncode
