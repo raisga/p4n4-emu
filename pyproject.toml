@@ -52,6 +52,10 @@ select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "compose: needs `docker compose` and the p4n4 stack checkouts (skipped without them)",
+  "integration: starts real containers; opt in with --run-integration",
+]
 
 [dependency-groups]
 dev = [

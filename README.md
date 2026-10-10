@@ -140,6 +140,24 @@ limits are set but not enforced.
 
 ---
 
+## Development
+
+```
+uv sync --extra dev
+uv run ruff check .
+uv run pytest                          # unit tests, plus overlays checked against the real stacks
+uv run pytest --run-integration        # also starts the iot stack and the simulator (needs Docker,
+                                       # and no other p4n4 project running)
+```
+
+`tests/test_real_stacks.py` merges every profile's overlay with the real stack compose files
+through `docker compose config`; it finds them in `../../stacks/*` and `../../dashboard` (the
+p4n4 repo), or `P4N4_STACKS_DIR` / `P4N4_DASHBOARD_DIR`. The integration test reads
+`P4N4_EMU_IT_PROFILE` (default `rpi4`), `P4N4_EMU_IT_ARCH` (e.g. `arm64`, default native)
+and `P4N4_EMU_IT_TIMEOUT`.
+
+---
+
 ## Command reference
 
 From a p4n4 project, `p4n4 up --emu rpi5` runs `p4n4-emu up --profile rpi5` for the

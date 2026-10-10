@@ -215,12 +215,25 @@ Line numbers below refer to the code before the fix.
 
 - [x] CLI tests with `typer.testing.CliRunner` and mocked `subprocess`. `up`, `down`, `logs`,
       `status`, `setup`, `sim` and `profile` have them (`tests/test_commands.py`).
-- [ ] Overlay tests that render every template against every profile and check the result with
-      `docker compose config` against the real stacks in `../../stacks/*`.
-- [ ] Integration job (marked, opt-in) that starts the iot stack under `mcu-class`, runs the simulator,
-      and checks that readings land in InfluxDB.
+- [x] Overlay tests that render every template against every profile and check the result with
+      `docker compose config` against the real stacks (`tests/test_real_stacks.py`, marker
+      `compose`): the merge must succeed, name exactly the stack's services, and carry every
+      limit. Stacks come from `../../stacks/*` and `../../dashboard`, or `P4N4_STACKS_DIR` /
+      `P4N4_DASHBOARD_DIR`; skipped without them or without `docker compose`.
+- [x] Integration test (marker `integration`, opt-in with `--run-integration`) that starts the
+      iot stack (mqtt, influxdb, node-red) under a profile, runs the simulator, and checks that
+      readings land in InfluxDB and every container runs with its limits
+      (`tests/test_integration.py`). It skips while any `p4n4-*` container exists on the host.
+      It defaults to `rpi4`, not `mcu-class`: 256 MB leaves Node-RED 38 MiB and InfluxDB
+      89 MiB, too little to start (see section 3, `mcu-class`). Not yet run green: the dev
+      host had a p4n4 project running.
 - [x] Regression tests for every P0 bug in section 1.
-- [ ] GitHub Actions: ruff + pytest on 3.11–3.13. Add arm64 runners or QEMU for the integration job.
+- [x] GitHub Actions (`.github/workflows/ci.yml`): `ruff check` + pytest on 3.11–3.13 with the
+      stack repos cloned for the compose tests. The integration job runs on demand
+      (`workflow_dispatch`, with a profile input) and weekly, on x86, on native arm64
+      (`ubuntu-24.04-arm`), and optionally on x86 with arm64 images under QEMU.
+- [ ] `ruff format`: 19 files would be reformatted (hand-wrapped argument lists such as
+      `"docker", "run", "-d",`). Decide whether to adopt it before adding it to CI.
 
 ## 8. Packaging and docs (P2)
 
