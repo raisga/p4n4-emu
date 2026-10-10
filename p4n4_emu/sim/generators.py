@@ -7,6 +7,8 @@ import random
 import time
 from collections.abc import Iterator
 
+from p4n4_emu.sim.scenario import Wave
+
 
 def _wave(
     base: float, amplitude: float, noise: float, period: float = 300.0, phase: float = 0.0
@@ -21,6 +23,18 @@ def _wave(
         value = base + amplitude * math.sin(2 * math.pi * (t / period + phase))
         value += random.gauss(0, noise)
         yield round(value, 3)
+
+
+def wave(w: Wave, phase: float = 0.0) -> Iterator[float]:
+    """A scenario measurement: _wave() clamped to the wave's min / max."""
+    gen = _wave(w.base, w.amplitude, w.noise, w.period, phase)
+    while True:
+        value = next(gen)
+        if w.min is not None:
+            value = max(w.min, value)
+        if w.max is not None:
+            value = min(w.max, value)
+        yield value
 
 
 def temperature_c(

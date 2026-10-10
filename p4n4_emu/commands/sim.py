@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import typer
@@ -14,6 +15,7 @@ from rich.console import Console
 from rich.table import Table
 
 from p4n4_emu import __version__
+from p4n4_emu.sim.scenario import Scenario, ScenarioError, load_scenario
 from p4n4_emu.utils.project import resolve_stack_dir
 from p4n4_emu.utils.stack_config import DEFAULT_BROKER_INFO, Broker, find_broker, load_config
 
@@ -29,18 +31,57 @@ _SIM_CONTAINER = "p4n4-sensor-sim"
 _PACKAGE = Path(__file__).parent.parent
 
 
+# Where the files `sim start` mounts appear inside the container
+_MOUNT_DIR = "/etc/p4n4-sim"
+
+
+@dataclass(frozen=True)
+class Connection:
+    """How the simulator logs in to the broker; None / False leaves the simulator's default."""
+
+    port: int | None = None
+    username: str | None = None
+    password: str | None = None
+    tls: bool = False
+    ca_file: Path | None = None
+    cert_file: Path | None = None
+    key_file: Path | None = None
+
+
 def start_simulator(
     *,
-    interval: float = 2.0,
-    devices: int = 1,
+    interval: float | None = None,
+    devices: int | None = None,
+    scenario: Path | None = None,
     broker: Broker = DEFAULT_BROKER_INFO,
+    connection: Connection = Connection(),
+    qos: int | None = None,
+    retain: bool | None = None,
     rebuild: bool = False,
     broker_timeout: float = 60.0,
 ) -> int:
     """Get the image if needed, wait for the broker, and run the simulator.
 
-    Returns the exit code of the failing step, or 0 on success.
+    Settings left as None use the scenario's, or the simulator's defaults. Returns the
+    exit code of the failing step, or 0 on success.
     """
+    loaded = None
+    if scenario is not None:
+        try:
+            loaded = load_scenario(scenario)
+        except ScenarioError as e:
+            console.print(f"[red]{e}[/red]")
+            return 1
+        if devices is not None:
+            console.print("[red]--devices can't be used with a scenario, which lists them.[/red]")
+            return 1
+
+    try:
+        options, env = _run_options(interval, devices, scenario, broker, connection, qos, retain)
+    except FileNotFoundError as e:
+        console.print(f"[red]File not found:[/red] {e}")
+        return 1
+
     rc = ensure_image(rebuild=rebuild)
     if rc != 0:
         return rc
@@ -60,28 +101,95 @@ def start_simulator(
             "--network", broker.network,
             # Restart if the broker drops or was not up yet; a clean stop exits 0
             "--restart", "on-failure",
-            "-e", f"MQTT_HOST={broker.host}",
-            "-e", f"SIM_INTERVAL_SEC={interval}",
-            "-e", f"SIM_DEVICE_COUNT={devices}",
+            *options,
             SIM_IMAGE,
         ],
         check=False,
+        env=env,
     ).returncode
 
     if rc == 0:
-        console.print(
-            f"[green]Sensor simulator started:[/green] "
-            f"{devices} device(s) → {broker.host} every {interval}s"
-        )
+        summary = _describe(loaded, devices, interval, broker)
+        console.print(f"[green]Sensor simulator started:[/green] {summary}")
     else:
         console.print("[red]Failed to start sensor simulator.[/red]")
     return rc
 
 
+def _run_options(
+    interval: float | None,
+    devices: int | None,
+    scenario: Path | None,
+    broker: Broker,
+    connection: Connection,
+    qos: int | None,
+    retain: bool | None,
+) -> tuple[list[str], dict[str, str] | None]:
+    """`docker run` options for the simulator's settings, and the environment to run it in.
+
+    The password reaches the container through the environment of `docker run`, so it
+    never shows on a command line.
+    """
+    opts = ["-e", f"MQTT_HOST={broker.host}"]
+    env = None
+
+    def mount(path: Path, name: str, var: str) -> None:
+        path = path.expanduser().resolve(strict=True)
+        opts.extend(["-v", f"{path}:{_MOUNT_DIR}/{name}:ro", "-e", f"{var}={_MOUNT_DIR}/{name}"])
+
+    if scenario is not None:
+        mount(scenario, "scenario.yml", "SIM_SCENARIO")
+    if interval is not None:
+        opts.extend(["-e", f"SIM_INTERVAL_SEC={interval}"])
+    if devices is not None:
+        opts.extend(["-e", f"SIM_DEVICE_COUNT={devices}"])
+    if qos is not None:
+        opts.extend(["-e", f"SIM_QOS={qos}"])
+    if retain is not None:
+        opts.extend(["-e", f"SIM_RETAIN={int(retain)}"])
+    if connection.port is not None:
+        opts.extend(["-e", f"MQTT_PORT={connection.port}"])
+    if connection.username:
+        opts.extend(["-e", f"MQTT_USERNAME={connection.username}"])
+    if connection.password:
+        opts.extend(["-e", "MQTT_PASSWORD"])
+        env = {**os.environ, "MQTT_PASSWORD": connection.password}
+    if connection.tls or connection.ca_file:
+        opts.extend(["-e", "MQTT_TLS=1"])
+    if connection.ca_file:
+        mount(connection.ca_file, "ca.crt", "MQTT_CA_FILE")
+    if connection.cert_file:
+        mount(connection.cert_file, "client.crt", "MQTT_CERT_FILE")
+    if connection.key_file:
+        mount(connection.key_file, "client.key", "MQTT_KEY_FILE")
+    return opts, env
+
+
+def _describe(
+    scenario: Scenario | None, devices: int | None, interval: float | None, broker: Broker
+) -> str:
+    if scenario is None:
+        return f"{devices or 1} device(s) → {broker.host} every {interval or 2.0}s"
+    faults = sum(len(d.faults) for d in scenario.devices)
+    return (
+        f"{len(scenario.devices)} device(s) from the scenario → {broker.host}"
+        + (f", {faults} fault rule(s)" if faults else "")
+    )
+
+
 @app.command("start")
 def start_cmd(
-    interval: float = typer.Option(2.0, "--interval", help="Publish interval in seconds."),
-    devices: int = typer.Option(1, "--devices", help="Number of simulated sensor devices."),
+    interval: float | None = typer.Option(
+        None, "--interval", help="Publish interval in seconds. Default: 2, or the scenario's."
+    ),
+    devices: int | None = typer.Option(
+        None, "--devices", help="Number of simulated devices, without a scenario. Default: 1."
+    ),
+    scenario: Path | None = typer.Option(
+        None,
+        "--scenario",
+        help="YAML file listing devices, measurements and faults (see `sim check`).",
+    ),
     mqtt_host: str | None = typer.Option(
         None,
         "--mqtt-host",
@@ -90,18 +198,90 @@ def start_cmd(
     network: str | None = typer.Option(
         None, "--network", help="Docker network to join. Default: the broker's network."
     ),
+    port: int | None = typer.Option(
+        None, "--port", help="Broker port. Default: 1883, or 8883 with TLS."
+    ),
+    username: str | None = typer.Option(
+        None, "--username", envvar="MQTT_USERNAME", help="Broker username."
+    ),
+    password: str | None = typer.Option(
+        None,
+        "--password",
+        envvar="MQTT_PASSWORD",
+        show_envvar=True,
+        help="Broker password; prefer the environment variable, which stays out of shell history.",
+    ),
+    tls: bool = typer.Option(
+        False, "--tls", help="Connect over TLS, verified against the system CAs."
+    ),
+    ca_file: Path | None = typer.Option(
+        None, "--ca-file", help="CA certificate to verify the broker with (implies --tls)."
+    ),
+    cert_file: Path | None = typer.Option(None, "--cert-file", help="Client certificate."),
+    key_file: Path | None = typer.Option(None, "--key-file", help="Client certificate's key."),
+    qos: int | None = typer.Option(
+        None, "--qos", min=0, max=2, help="QoS of every publish. Default: 0, or the scenario's."
+    ),
+    retain: bool | None = typer.Option(
+        None, "--retain/--no-retain", help="Publish with the retain flag. Default: the scenario's."
+    ),
     rebuild: bool = typer.Option(False, "--rebuild", help="Force rebuild of the image."),
 ) -> None:
     """Start the sensor simulator container."""
+    if (cert_file is None) != (key_file is None):
+        console.print("[red]--cert-file and --key-file go together.[/red]")
+        raise typer.Exit(1)
     found = project_broker()
     target = Broker(
         host=mqtt_host or found.host,
         container=mqtt_host or found.container,
         network=network or found.network,
     )
-    rc = start_simulator(interval=interval, devices=devices, broker=target, rebuild=rebuild)
+    connection = Connection(port, username, password, tls, ca_file, cert_file, key_file)
+    rc = start_simulator(
+        interval=interval,
+        devices=devices,
+        scenario=scenario,
+        broker=target,
+        connection=connection,
+        qos=qos,
+        retain=retain,
+        rebuild=rebuild,
+    )
     if rc != 0:
         raise typer.Exit(rc)
+
+
+@app.command("check")
+def check_cmd(
+    scenario: Path = typer.Argument(..., help="Scenario file to check."),
+) -> None:
+    """Check a scenario file and list the devices it simulates."""
+    try:
+        loaded = load_scenario(scenario)
+    except ScenarioError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+    table = Table(title=f"Scenario: {scenario}", show_lines=False)
+    table.add_column("Device")
+    table.add_column("Every")
+    table.add_column("Measurements")
+    table.add_column("Faults")
+    for d in loaded.devices:
+        faults = ", ".join(
+            f"{f.type}" + (f" ({f.measurement})" if f.measurement else "") for f in d.faults
+        )
+        table.add_row(d.id, f"{loaded.interval_of(d):g}s", ", ".join(d.measurements), faults or "—")
+    console.print(table)
+    flags = [f"QoS {loaded.qos}"]
+    if loaded.retain:
+        flags.append("retained")
+    if loaded.timestamp:
+        flags.append("timestamped")
+    if loaded.seed is not None:
+        flags.append(f"seed {loaded.seed}")
+    console.print(f"[dim]{', '.join(flags)}[/dim]")
 
 
 @app.command("stop")

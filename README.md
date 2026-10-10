@@ -178,8 +178,8 @@ project's stacks, and `p4n4 down` hands the stacks p4n4-emu started back to
 p4n4-emu setup [--arch arm64|armv7] [--check-only]
 p4n4-emu up    [--profile rpi5] [--stack iot|ai|edge|dashboard|iot,ai|all]
                [--stack-dir PATH] [--arch arm64|armv7|x86_64 | --native]
-               [--sim] [--sim-interval 2.0] [--sim-devices 1] [--build] [--pull]
-               [--dry-run]
+               [--sim] [--sim-interval 2.0] [--sim-devices 1] [--sim-scenario FILE]
+               [--build] [--pull] [--dry-run]
 p4n4-emu down  [--stack iot|ai|edge|dashboard|iot,ai|all]
                [--stack-dir PATH] [--volumes] [--yes]
 p4n4-emu status [--profile rpi5] [--stack iot|ai|edge|dashboard|iot,ai|all] [--json]
@@ -188,7 +188,11 @@ p4n4-emu logs  [SERVICE] [--stack iot|ai|edge|dashboard|iot,ai|all]
 p4n4-emu profile list [--json]
 p4n4-emu profile show <name> [--json]
 p4n4-emu profile switch <name> [--stack ...] [--dry-run]
-p4n4-emu sim start [--interval 2.0] [--devices 1] [--mqtt-host HOST] [--network NAME]
+p4n4-emu sim start [--interval 2.0] [--devices 1 | --scenario FILE]
+                   [--mqtt-host HOST] [--network NAME] [--port PORT]
+                   [--username USER] [--tls] [--ca-file PATH] [--cert-file PATH --key-file PATH]
+                   [--qos 0|1|2] [--retain] [--rebuild]
+p4n4-emu sim check FILE
 p4n4-emu sim stop
 p4n4-emu sim status
 ```
@@ -256,6 +260,78 @@ Run standalone (against a local Mosquitto):
 ```bash
 MQTT_HOST=localhost uv run python -m p4n4_emu.sim.sensor_sim
 ```
+
+### Scenarios and faults
+
+A scenario file replaces the default devices: which devices exist, what each one measures,
+how often, and how it misbehaves. [`examples/sim-scenario.yml`](examples/sim-scenario.yml)
+uses every option:
+
+```yaml
+interval: 2          # seconds between readings, for devices without their own
+qos: 1               # QoS of every publish
+retain: false
+timestamp: true      # add "ts" (epoch ms, when the reading was taken)
+seed: 42             # the same faults fire at the same readings every run
+devices:
+  - id: emu-room-{n}             # emu-room-0 … emu-room-2
+    count: 3
+    measurements: [temperature, humidity]
+  - id: iot-device-001
+    interval: 5
+    measurements:
+      temperature: {base: 40, amplitude: 8}             # a built-in, changed
+      vibration: {base: 0.5, amplitude: 0.2, unit: g, min: 0}
+    faults:
+      - {type: spike, measurement: vibration, probability: 0.02, magnitude: 2}
+      - {type: dropout, probability: 0.005, duration: 30}
+```
+
+```bash
+p4n4-emu sim check plant.yml               # validate it and list the devices
+p4n4-emu sim start --scenario plant.yml    # or: p4n4-emu up --sim --sim-scenario plant.yml
+```
+
+Measurements are the built-ins (`temperature`, `humidity`, `pressure`, `raw`), or any other
+name with at least a `base`. A wave takes `base`, `amplitude`, `noise` (σ), `period` (s,
+default 300), `min`, `max` and `unit`. A fault applies to every measurement of its device,
+or to the one it names, and fires with its `probability` (default 1) on each reading:
+
+| Fault | Setting | Effect |
+|---|---|---|
+| `spike` | `magnitude` | The reading is off by ±magnitude |
+| `stuck` | `duration` | The value freezes for that many seconds |
+| `drift` | `rate` | The value moves by rate units per second since the simulator started |
+| `dropout` | `duration` | The reading isn't published (for `duration` s, if given). Without a `measurement`, the whole device goes quiet |
+| `delay` | `seconds` | The reading is published that late, after newer ones (add `timestamp: true` to see it) |
+| `malformed` | — | The payload is broken: truncated JSON, not JSON, a string value, or no value |
+
+`--interval` overrides the scenario's `interval` (not a device's own), and `--qos` /
+`--retain` override its settings. `--devices` and a scenario don't mix.
+
+### Broker login and TLS
+
+The iot stack's broker allows anonymous clients. Against a hardened one, log in as a device
+account and name the device after it, since the ACL only lets `iot-device-001` write
+`sensors/iot-device-001/+`:
+
+```bash
+export MQTT_PASSWORD=...                    # read by --password; stays out of shell history
+p4n4-emu sim start --scenario plant.yml --username iot-device-001
+p4n4-emu sim start --username iot-device-001 --ca-file certs/ca.crt   # TLS, port 8883
+```
+
+`--tls` verifies the broker against the system CAs, `--ca-file` against your own CA, and
+`--cert-file` / `--key-file` add a client certificate. The files are mounted read-only
+into the container. The password reaches it through `docker run`'s environment, so it
+isn't on a command line, but `docker inspect p4n4-sensor-sim` shows it. Run standalone,
+the simulator reads `MQTT_USERNAME`, `MQTT_PASSWORD`, `MQTT_TLS`, `MQTT_CA_FILE`,
+`MQTT_CERT_FILE`, `MQTT_KEY_FILE`, `SIM_SCENARIO`, `SIM_QOS` and `SIM_RETAIN` (see
+`p4n4_emu/sim/sensor_sim.py`).
+
+All devices share the simulator's one connection, so they all log in as the same user. To
+simulate several devices against per-device ACLs, run one simulator per account or use a
+`pattern write sensors/%u/+` ACL rule.
 
 ## How faithful the emulation is
 

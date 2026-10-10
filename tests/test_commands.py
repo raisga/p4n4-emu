@@ -106,8 +106,23 @@ def test_up_sim_uses_shared_start_with_options(stack_dir, preflight_calls, monke
     )
     assert result.exit_code == 0, result.output
     assert calls == [
-        {"interval": 0.5, "devices": 3, "broker": stack_config.DEFAULT_BROKER_INFO}
+        {"interval": 0.5, "devices": 3, "scenario": None,
+         "broker": stack_config.DEFAULT_BROKER_INFO}
     ]
+
+
+def test_up_sim_scenario_leaves_interval_and_devices_to_it(
+    stack_dir, preflight_calls, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(up, "start_simulator", lambda **kw: calls.append(kw) or 0)
+    result = runner.invoke(
+        app, ["up", "--native", "--stack-dir", str(stack_dir), "--sim",
+              "--sim-scenario", "plant.yml"],
+    )
+    assert result.exit_code == 0, result.output
+    assert calls[0]["scenario"] == Path("plant.yml")
+    assert calls[0]["interval"] is None and calls[0]["devices"] is None
 
 
 def _docker(commands, failing=()):
@@ -172,6 +187,130 @@ def test_build_context_is_the_package_alone(monkeypatch):
     monkeypatch.setattr(sim.subprocess, "run", run)
     assert sim.ensure_image(rebuild=True) == 0
     assert seen == {"entries": ["p4n4_emu"], "dockerfile": True, "pycache": False}
+
+
+_SCENARIO = "devices:\n  - id: iot-device-001\n    measurements: [temperature]\n"
+
+
+def _docker_run(monkeypatch):
+    """Record the `docker run` command and its environment; every other step succeeds."""
+    seen = {}
+
+    def run(cmd, **kwargs):
+        if cmd[1] == "run":
+            seen["cmd"], seen["env"] = cmd, kwargs.get("env")
+        return subprocess.CompletedProcess(cmd, 0, stdout="healthy")
+
+    monkeypatch.setattr(sim.subprocess, "run", run)
+    monkeypatch.setattr(sim, "_image_exists", lambda: True)
+    return seen
+
+
+def _env_flags(cmd):
+    return [cmd[i + 1] for i, a in enumerate(cmd) if a == "-e"]
+
+
+def _mounts(cmd):
+    return [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
+
+
+def test_start_simulator_default_run_sets_only_the_host(monkeypatch):
+    seen = _docker_run(monkeypatch)
+    assert sim.start_simulator() == 0
+    # The image's defaults apply: no interval or device count that would beat a scenario's
+    assert _env_flags(seen["cmd"]) == ["MQTT_HOST=p4n4-mqtt"]
+    assert seen["env"] is None
+
+
+def test_start_simulator_mounts_the_scenario(monkeypatch, tmp_path):
+    seen = _docker_run(monkeypatch)
+    path = tmp_path / "plant.yml"
+    path.write_text(_SCENARIO)
+    assert sim.start_simulator(scenario=path, qos=1, retain=False) == 0
+    assert _mounts(seen["cmd"]) == [f"{path}:/etc/p4n4-sim/scenario.yml:ro"]
+    assert _env_flags(seen["cmd"])[1:] == [
+        "SIM_SCENARIO=/etc/p4n4-sim/scenario.yml", "SIM_QOS=1", "SIM_RETAIN=0",
+    ]
+
+
+def test_start_simulator_rejects_an_invalid_scenario_before_docker(monkeypatch, tmp_path):
+    seen = _docker_run(monkeypatch)
+    path = tmp_path / "plant.yml"
+    path.write_text("devices: []\n")
+    assert sim.start_simulator(scenario=path) == 1
+    assert seen == {}
+
+
+def test_start_simulator_scenario_excludes_devices(monkeypatch, tmp_path):
+    seen = _docker_run(monkeypatch)
+    path = tmp_path / "plant.yml"
+    path.write_text(_SCENARIO)
+    assert sim.start_simulator(scenario=path, devices=2) == 1
+    assert seen == {}
+
+
+def test_start_simulator_password_stays_off_the_command_line(monkeypatch, tmp_path):
+    seen = _docker_run(monkeypatch)
+    ca = tmp_path / "ca.crt"
+    ca.write_text("cert")
+    connection = sim.Connection(
+        port=8883, username="iot-device-001", password="s3cret", ca_file=ca
+    )
+    assert sim.start_simulator(connection=connection) == 0
+    assert "s3cret" not in " ".join(seen["cmd"])
+    assert seen["env"]["MQTT_PASSWORD"] == "s3cret"
+    assert _env_flags(seen["cmd"])[1:] == [
+        "MQTT_PORT=8883", "MQTT_USERNAME=iot-device-001", "MQTT_PASSWORD", "MQTT_TLS=1",
+        "MQTT_CA_FILE=/etc/p4n4-sim/ca.crt",
+    ]
+    assert _mounts(seen["cmd"]) == [f"{ca}:/etc/p4n4-sim/ca.crt:ro"]
+
+
+def test_start_simulator_missing_cert_file(monkeypatch, tmp_path):
+    seen = _docker_run(monkeypatch)
+    connection = sim.Connection(ca_file=tmp_path / "missing.crt")
+    assert sim.start_simulator(connection=connection) == 1
+    assert seen == {}
+
+
+def test_sim_start_reads_the_password_from_env(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sim, "project_broker", lambda: stack_config.DEFAULT_BROKER_INFO)
+    monkeypatch.setattr(sim, "start_simulator", lambda **kw: calls.append(kw) or 0)
+    result = runner.invoke(
+        app, ["sim", "start", "--username", "dev", "--tls", "--qos", "1", "--retain"],
+        env={"MQTT_PASSWORD": "from-env"},
+    )
+    assert result.exit_code == 0, result.output
+    assert calls[0]["connection"] == sim.Connection(username="dev", password="from-env", tls=True)
+    assert calls[0]["qos"] == 1 and calls[0]["retain"] is True
+
+
+def test_sim_start_cert_needs_key(monkeypatch):
+    monkeypatch.setattr(sim, "project_broker", lambda: stack_config.DEFAULT_BROKER_INFO)
+    result = runner.invoke(app, ["sim", "start", "--cert-file", "client.crt"])
+    assert result.exit_code == 1
+    assert "go together" in result.output
+
+
+def test_sim_check_lists_the_devices(tmp_path):
+    path = tmp_path / "plant.yml"
+    path.write_text(
+        "seed: 7\ndevices:\n  - id: node-{n}\n    count: 2\n    interval: 5\n"
+        "    faults: [{type: dropout, probability: 0.1}]\n"
+    )
+    result = runner.invoke(app, ["sim", "check", str(path)])
+    assert result.exit_code == 0, result.output
+    assert "node-0" in result.output and "node-1" in result.output
+    assert "dropout" in result.output and "seed 7" in result.output
+
+
+def test_sim_check_reports_errors(tmp_path):
+    path = tmp_path / "plant.yml"
+    path.write_text("devices: [{id: d, count: 2}]\n")
+    result = runner.invoke(app, ["sim", "check", str(path)])
+    assert result.exit_code == 1
+    assert "needs {n}" in result.output
 
 
 def test_wait_for_broker_times_out(monkeypatch):

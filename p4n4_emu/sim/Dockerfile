@@ -7,9 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY p4n4_emu/ ./p4n4_emu/
 
+# The port, interval and device count default in sensor_sim.py: set here, they would
+# override a scenario's interval and the TLS port
 ENV MQTT_HOST=p4n4-mqtt
-ENV MQTT_PORT=1883
-ENV SIM_INTERVAL_SEC=2.0
-ENV SIM_DEVICE_COUNT=1
 
 CMD ["python", "-m", "p4n4_emu.sim.sensor_sim"]

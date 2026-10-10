@@ -95,11 +95,25 @@ def cmd(
     ] = False,
     sim: Annotated[bool, typer.Option("--sim", help="Also start the sensor simulator.")] = False,
     sim_interval: Annotated[
-        float, typer.Option("--sim-interval", help="Simulator publish interval in seconds.")
-    ] = 2.0,
+        float | None,
+        typer.Option(
+            "--sim-interval",
+            help="Simulator publish interval in seconds. Default: 2, or the scenario's.",
+        ),
+    ] = None,
     sim_devices: Annotated[
-        int, typer.Option("--sim-devices", help="Number of simulated sensor devices.")
-    ] = 1,
+        int | None,
+        typer.Option(
+            "--sim-devices", help="Number of simulated sensor devices, without a scenario."
+        ),
+    ] = None,
+    sim_scenario: Annotated[
+        Path | None,
+        typer.Option(
+            "--sim-scenario",
+            help="Simulator scenario file: devices, measurements and faults (see `sim check`).",
+        ),
+    ] = None,
     build: Annotated[bool, typer.Option("--build", help="Rebuild images before starting.")] = False,
     pull: Annotated[
         bool, typer.Option("--pull", help="Pull the latest images before starting.")
@@ -198,6 +212,7 @@ def cmd(
         rc = start_simulator(
             interval=sim_interval,
             devices=sim_devices,
+            scenario=sim_scenario,
             broker=broker_info or project_broker(stack_dir),
         )
         if rc != 0:

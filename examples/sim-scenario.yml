@@ -1,0 +1,29 @@
+# Sensor simulator scenario: check it with `p4n4-emu sim check examples/sim-scenario.yml`,
+# run it with `p4n4-emu sim start --scenario examples/sim-scenario.yml`.
+
+interval: 2          # seconds between readings, for devices without their own
+qos: 0               # QoS of every publish: 0, 1 or 2
+retain: false        # publish with the retain flag
+timestamp: true      # add "ts" (epoch ms, when the reading was taken) to each payload
+seed: 42             # the same faults fire at the same readings every run
+
+devices:
+  # Three healthy room sensors: emu-room-0, emu-room-1, emu-room-2
+  - id: emu-room-{n}
+    count: 3
+    measurements: [temperature, humidity]
+
+  # A device whose id the hardened broker's ACL allows (acl.example: iot-device-001)
+  - id: iot-device-001
+    interval: 5
+    measurements:
+      temperature: {base: 40, amplitude: 8, period: 600}   # built-in, changed
+      vibration: {base: 0.5, amplitude: 0.2, noise: 0.05, unit: g, min: 0}
+      raw:                                                  # accelerometer + CPU load
+    faults:
+      - {type: spike, measurement: vibration, probability: 0.02, magnitude: 2}
+      - {type: drift, measurement: temperature, rate: 0.001}     # +3.6 °C per hour
+      - {type: stuck, measurement: temperature, probability: 0.01, duration: 60}
+      - {type: delay, measurement: raw, probability: 0.1, seconds: 12}
+      - {type: malformed, probability: 0.01}
+      - {type: dropout, probability: 0.005, duration: 30}         # the whole device goes quiet

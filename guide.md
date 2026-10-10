@@ -150,7 +150,7 @@ What each flag does:
 | `--stack iot` | Target the IoT stack (MQTT, InfluxDB, Node-RED, Grafana); accepts comma-separated names or `all`; defaults to the project's enabled stacks |
 | `--stack-dir` | Path to the directory with the stack's compose file (not needed inside a p4n4 project) |
 | `--native` | Run host-architecture images; apply only the resource limits |
-| `--sim` | Also start the sensor simulator container (`--sim-interval`, `--sim-devices` tune it) |
+| `--sim` | Also start the sensor simulator container (`--sim-interval`, `--sim-devices` or `--sim-scenario` tune it; see the README's *Scenarios and faults*) |
 
 Use `--dry-run` to preview the generated overlay without starting anything:
 
@@ -409,7 +409,9 @@ p4n4-emu status --stack <stack> --stack-dir <path>
 p4n4-emu logs [SERVICE] --stack <stack> [--tail 100] [--no-follow]
 
 # Simulator only
-p4n4-emu sim start [--interval 2.0] [--devices 1] [--mqtt-host HOST] [--network NAME]
+p4n4-emu sim start [--interval 2.0] [--devices 1 | --scenario FILE] [--mqtt-host HOST] [--network NAME]
+                   [--username USER] [--tls] [--ca-file PATH] [--qos 0|1|2] [--retain]
+p4n4-emu sim check FILE   # validate a scenario (devices, measurements, faults)
 p4n4-emu sim stop
 p4n4-emu sim status
 

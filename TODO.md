@@ -157,17 +157,29 @@ Line numbers below refer to the code before the fix.
 
 ## 5. Sensor simulator (P1)
 
-- [ ] Configurable devices and measurements from a YAML scenario file (count, ids,
+- [x] Configurable devices and measurements from a YAML scenario file (count, ids,
       measurement set, ranges, rates per device), replacing the four hardcoded measurements.
+      `sim start --scenario` / `up --sim-scenario` mount it; `sim check` validates it, and
+      every error names the key at fault. `examples/sim-scenario.yml` uses every option.
 - [x] Per-device phase. Each device's curves are shifted by a phase derived from its id.
-- [ ] Fault injection: spikes, stuck values, drift, dropouts, out-of-order and late timestamps,
+- [x] Fault injection: spikes, stuck values, drift, dropouts, out-of-order and late timestamps,
       malformed payloads. These exercise the Node-RED flows and anomaly detection.
+      Faults live in the scenario (`spike`, `stuck`, `drift`, `dropout`, `delay`, `malformed`),
+      per device or per measurement, with a `seed` for repeatable runs. `delay` publishes a
+      reading late, after newer ones; `timestamp: true` adds the `ts` it was taken at. The
+      Node-RED flow stores readings at arrival time and ignores `ts`, so a late reading is
+      only visible as out of order on the broker, not in InfluxDB.
 - [ ] Replay mode from a CSV / InfluxDB export.
-- [ ] Broker auth and TLS (`MQTT_USERNAME` / `MQTT_PASSWORD` / CA). The iot stack ships
+- [x] Broker auth and TLS (`MQTT_USERNAME` / `MQTT_PASSWORD` / CA). The iot stack ships
       `allow_anonymous true` today, but the hardened config and `acl.example` only let the device
       account write `sensors/iot-device-001/+`, so `emu-sensor-*` ids would be denied.
+      `sim start --username` (password from `MQTT_PASSWORD`), `--tls`, `--ca-file`,
+      `--cert-file` / `--key-file`, `--port`; a scenario names the device after the account.
+      Checked against Mosquitto with a password file, that ACL and a TLS listener. One
+      connection for every device: per-device accounts need one simulator each.
 - [x] Reconnect with backoff (1 s doubling to 30 s), including when the broker is not up yet.
-- [ ] QoS / retain options for the simulator's publishes.
+- [x] QoS / retain options for the simulator's publishes (scenario `qos` / `retain`,
+      `sim start --qos` / `--retain`).
 - [x] Read `SIM_DEVICE_COUNT` (and the other settings) when `run()` is called, not at import.
 - [ ] Optional simulated **camera / audio feed** for the edge runner, so `ei-runner` can be tested
       without a physical sensor.
