@@ -12,7 +12,7 @@ Step-by-step guide to install the emulator, start simulated sensor data, and dri
 | Docker Compose (plugin) | 2.17 | `docker compose version` |
 | Python | 3.11 | `python --version` |
 | uv (package manager) | any | `uv --version` |
-| cgroup v2 | — | `cat /sys/fs/cgroup/cgroup.controllers` (must exist) |
+| cgroup v2 | — | `docker info -f '{{.CgroupVersion}}'` prints `2` (on v1, disk limits only throttle direct I/O) |
 
 Install `uv` if missing:
 
@@ -33,9 +33,11 @@ uv tool install --editable .
 `uv tool install` installs p4n4-emu and its dependencies in their own environment and puts
 `p4n4-emu` on your `PATH`, so it works from any directory, including your p4n4 projects.
 
-`--editable` keeps the install pointing at this checkout, which `sim` builds its
-image from. To work on p4n4-emu itself, `uv sync` and `uv run p4n4-emu` also work, but
-only inside `tools/emu`: run from a p4n4 project, `uv run` doesn't find the command.
+`--editable` keeps the install pointing at this checkout, so edits apply on the next
+command. The simulator image is pulled from `ghcr.io/raisga/p4n4-sensor-sim`, or built
+from the package when that fails; `p4n4-emu sim start --rebuild` builds it from your
+edits. To work on p4n4-emu itself, `uv sync` and `uv run p4n4-emu` also work, but only
+inside `tools/emu`: run from a p4n4 project, `uv run` doesn't find the command.
 
 Verify the CLI is available:
 

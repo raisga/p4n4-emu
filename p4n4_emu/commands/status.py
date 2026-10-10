@@ -124,8 +124,8 @@ def cmd(
         )
     if active and not cgroup_v2():
         console.print(
-            "[yellow]Warning:[/yellow] cgroup v2 not detected: the limits are set on the "
-            "containers, but the kernel doesn't enforce them."
+            "[yellow]Warning:[/yellow] cgroup v2 not detected: CPU and memory limits apply, "
+            "but disk limits only throttle direct I/O, so buffered writes run unthrottled."
         )
 
 

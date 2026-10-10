@@ -1,0 +1,108 @@
+name: Image
+
+# The sensor simulator image (p4n4_emu/sim/Dockerfile) on GHCR, for linux/amd64 and
+# linux/arm64, which `p4n4-emu up --sim` / `sim start` pull before building locally:
+#   - push to main  → :edge
+#   - tag vX.Y.Z    → :X.Y.Z, :X.Y, :latest (the tag must match pyproject.toml, since
+#                     p4n4-emu X.Y.Z pulls :X.Y.Z)
+#   - pull request  → build and smoke-test only, nothing pushed
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/p4n4-sensor-sim
+
+jobs:
+  image:
+    name: Build, test and push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match pyproject.toml version $version"
+            exit 1
+          fi
+
+      # The arm64 build runs `pip install` under QEMU
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=edge,branch=main
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=pr
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+
+      - name: Build for the smoke test (amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: p4n4_emu/sim/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: p4n4-sensor-sim:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          docker network create smoke
+          docker run -d --name broker --network smoke eclipse-mosquitto:2 \
+            mosquitto -c /mosquitto-no-auth.conf
+          docker run -d --name sim --network smoke -e MQTT_HOST=broker \
+            -e SIM_INTERVAL_SEC=0.5 -e SIM_DEVICE_COUNT=2 p4n4-sensor-sim:smoke
+          trap 'docker logs sim; docker rm -f sim broker >/dev/null' EXIT
+          # One reading on the spec topic, sensors/<device-id>/<measurement>, as JSON
+          msg=$(docker exec broker timeout 30 mosquitto_sub -t 'sensors/+/temperature' -C 1 -v)
+          echo "$msg"
+          echo "$msg" | grep -Eq '^sensors/emu-sensor-[0-9]+/temperature \{.*"value"'
+          # A clean stop: SIGTERM ends it with exit code 0, well before docker's 10 s
+          docker stop -t 10 sim
+          test "$(docker inspect -f '{{.State.ExitCode}}' sim)" = 0
+
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (amd64, arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: p4n4_emu/sim/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true

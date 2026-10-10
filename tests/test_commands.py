@@ -1,6 +1,7 @@
 """CLI command tests with Docker calls stubbed out."""
 
 import subprocess
+from pathlib import Path
 
 import pytest
 import yaml
@@ -109,33 +110,68 @@ def test_up_sim_uses_shared_start_with_options(stack_dir, preflight_calls, monke
     ]
 
 
-def test_start_simulator_builds_before_running(monkeypatch):
-    commands = []
-
-    def fake_run(cmd, **kwargs):
+def _docker(commands, failing=()):
+    """A subprocess.run that records `docker <verb>` and fails the verbs in *failing*."""
+    def run(cmd, **kwargs):
         commands.append(cmd[:2])
-        return subprocess.CompletedProcess(cmd, 0, stdout="healthy")
+        rc = 1 if cmd[1] in failing else 0
+        return subprocess.CompletedProcess(cmd, rc, stdout="healthy")
 
-    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    return run
+
+
+def test_start_simulator_pulls_the_published_image(monkeypatch):
+    commands = []
+    monkeypatch.setattr(sim.subprocess, "run", _docker(commands))
+    monkeypatch.setattr(sim, "_image_exists", lambda: False)
+    assert sim.start_simulator() == 0
+    assert commands == [
+        ["docker", "pull"], ["docker", "inspect"], ["docker", "rm"], ["docker", "run"],
+    ]
+
+
+def test_start_simulator_builds_when_the_pull_fails(monkeypatch):
+    commands = []
+    monkeypatch.setattr(sim.subprocess, "run", _docker(commands, failing=("pull",)))
     monkeypatch.setattr(sim, "_image_exists", lambda: False)
     assert sim.start_simulator() == 0
     # build completes (run is synchronous) before the broker wait and the container start
     assert commands == [
-        ["docker", "build"], ["docker", "inspect"], ["docker", "rm"], ["docker", "run"],
+        ["docker", "pull"], ["docker", "build"],
+        ["docker", "inspect"], ["docker", "rm"], ["docker", "run"],
     ]
+
+
+def test_start_simulator_uses_a_local_image(monkeypatch):
+    commands = []
+    monkeypatch.setattr(sim.subprocess, "run", _docker(commands))
+    monkeypatch.setattr(sim, "_image_exists", lambda: True)
+    assert sim.start_simulator() == 0
+    assert ["docker", "pull"] not in commands and ["docker", "build"] not in commands
 
 
 def test_start_simulator_stops_when_build_fails(monkeypatch):
     commands = []
-
-    def fake_run(cmd, **kwargs):
-        commands.append(cmd[:2])
-        return subprocess.CompletedProcess(cmd, 1)
-
-    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    monkeypatch.setattr(sim.subprocess, "run", _docker(commands, failing=("pull", "build")))
     monkeypatch.setattr(sim, "_image_exists", lambda: False)
     assert sim.start_simulator() == 1
-    assert commands == [["docker", "build"]]
+    assert commands == [["docker", "pull"], ["docker", "build"]]
+
+
+def test_build_context_is_the_package_alone(monkeypatch):
+    # Installed from a wheel, the package's parent is site-packages
+    seen = {}
+
+    def run(cmd, **kwargs):
+        context = Path(cmd[-1])
+        seen["entries"] = sorted(p.name for p in context.iterdir())
+        seen["dockerfile"] = Path(cmd[cmd.index("-f") + 1]).is_file()
+        seen["pycache"] = any(context.rglob("__pycache__"))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(sim.subprocess, "run", run)
+    assert sim.ensure_image(rebuild=True) == 0
+    assert seen == {"entries": ["p4n4_emu"], "dockerfile": True, "pycache": False}
 
 
 def test_wait_for_broker_times_out(monkeypatch):
@@ -301,7 +337,7 @@ def test_status_profile_option_warns_on_mismatch(status_env, tmp_path):
 def test_status_warns_when_cgroup_v2_is_missing(status_env, tmp_path, monkeypatch):
     _write_overlay(tmp_path / "iot")
     monkeypatch.setattr(status, "cgroup_v2", lambda: False)
-    assert "doesn't enforce them" in _status().output
+    assert "buffered writes run unthrottled" in " ".join(_status().output.split())
 
 
 # ── logs ──────────────────────────────────────────────────────────────────────

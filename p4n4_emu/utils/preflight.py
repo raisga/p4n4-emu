@@ -85,8 +85,9 @@ def run_preflight(require_qemu: bool = False, platform: str = "linux/arm64") -> 
         )
     elif not cgroup_v2(host):
         errors.append(
-            "WARNING: cgroup v2 not detected. CPU/memory limits may not be enforced. "
-            "Check your kernel boot parameters (systemd.unified_cgroup_hierarchy=1)."
+            "WARNING: cgroup v2 not detected. CPU and memory limits still apply, but disk "
+            "limits only throttle direct I/O (buffered writes pass), and swap limits need "
+            "swap accounting (swapaccount=1). Switch with systemd.unified_cgroup_hierarchy=1."
         )
 
     # QEMU binfmt for the emulated architecture. Docker Desktop's VM registers

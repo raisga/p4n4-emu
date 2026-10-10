@@ -225,7 +225,8 @@ Line numbers below refer to the code before the fix.
       readings land in InfluxDB and every container runs with its limits
       (`tests/test_integration.py`). It skips while any `p4n4-*` container exists on the host.
       It defaults to `rpi4`, not `mcu-class`: 256 MB leaves Node-RED 38 MiB and InfluxDB
-      89 MiB, too little to start (see section 3, `mcu-class`). Not yet run green: the dev
+      89 MiB, below what they use (InfluxDB alone used 137 MiB on a workstation), so
+      expect OOM kills (see section 3, `mcu-class`). Not yet run green: the dev
       host had a p4n4 project running.
 - [x] Regression tests for every P0 bug in section 1.
 - [x] GitHub Actions (`.github/workflows/ci.yml`): `ruff check` + pytest on 3.11–3.13 with the
@@ -237,10 +238,18 @@ Line numbers below refer to the code before the fix.
 
 ## 8. Packaging and docs (P2)
 
-- [ ] The simulator image builds from the source checkout root (`commands/sim.py:18`). Installed
-      from a wheel, the build context becomes `site-packages`. Publish a prebuilt multi-arch
-      image (`ghcr.io/raisga/p4n4-sensor-sim`) and only build locally as a fallback.
-- [ ] Publish `p4n4-emu` to PyPI next to `p4n4-lib`.
-- [ ] Document how faithful each limit is (what is enforced and what is approximated) and how
-      profile numbers were chosen.
-- [ ] Add a docs page in `web/docs` and link it from the main README.
+- [x] The simulator image builds from the source checkout root. It now runs
+      `ghcr.io/raisga/p4n4-sensor-sim:<version>`: a local image first, else the published one,
+      else a build whose context is a copy of the package alone (so it works from a wheel).
+      `.github/workflows/image.yml` publishes amd64 + arm64 (`:edge` from main, `:X.Y.Z` from
+      tags) after a smoke test against Mosquitto. `P4N4_EMU_SIM_IMAGE` overrides the image.
+- [ ] Publish `p4n4-emu` to PyPI next to `p4n4-lib`. Ready: `.github/workflows/publish.yml`
+      (on a GitHub release, trusted publishing, checks the tag and the wheel's data files) and
+      the package metadata. Left: create the `pypi` environment and the PyPI trusted
+      publisher, then tag `v0.1.0` so the image and the package go out together.
+- [x] Document how faithful each limit is (what is enforced and what is approximated) and how
+      profile numbers were chosen (README, "How faithful the emulation is"). The cgroup v1
+      warnings now say what v1 actually loses (buffered-write throttling, swap accounting).
+- [x] Docs page: `docs/reference/emulator.md` (p4n4-docs, formerly `web/docs`) is brought up to
+      date and linked from the main README's Quick Start; `cli-reference.md` documents
+      `p4n4 up --emu`.

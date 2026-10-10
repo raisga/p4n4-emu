@@ -9,6 +9,7 @@ description = "Sandbox emulator for the p4n4 IoT + Edge AI platform"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+authors = [{ name = "RAISGA", email = "jraleman@raisga.com" }]
 keywords = ["iot", "edge-ai", "docker", "emulator", "raspberry-pi"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -38,6 +39,7 @@ p4n4-emu = "p4n4_emu.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/raisga/p4n4-emu"
+Documentation = "https://github.com/raisga/p4n4-docs/blob/main/reference/emulator.md"
 Issues = "https://github.com/raisga/p4n4-emu/issues"
 
 [tool.hatch.build.targets.wheel]

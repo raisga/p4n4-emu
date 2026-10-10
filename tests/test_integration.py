@@ -10,7 +10,7 @@ p4n4 stacks use fixed container names (p4n4-mqtt, ...), so it refuses to run whi
 any p4n4 container exists on the host rather than touch another project.
 
   P4N4_EMU_IT_PROFILE  profile to run under (default rpi4; mcu-class's 256 MB
-                       leaves Node-RED 38 MiB, too little to start)
+                       leaves Node-RED 38 MiB and InfluxDB 89 MiB)
   P4N4_EMU_IT_ARCH     emulate an architecture, e.g. arm64 (default: native)
   P4N4_EMU_IT_TIMEOUT  seconds to wait for the first reading (default 240)
 """

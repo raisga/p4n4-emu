@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -10,15 +13,20 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from p4n4_emu import __version__
 from p4n4_emu.utils.project import resolve_stack_dir
 from p4n4_emu.utils.stack_config import DEFAULT_BROKER_INFO, Broker, find_broker, load_config
 
 app = typer.Typer(help="Manage the sensor data simulator.", no_args_is_help=True)
 console = Console()
 
-_SIM_IMAGE = "p4n4-sensor-sim"
+# Published for linux/amd64 and linux/arm64 by .github/workflows/image.yml, one tag per
+# release; P4N4_EMU_SIM_IMAGE points at another (a mirror, or a local build)
+SIM_IMAGE = os.environ.get(
+    "P4N4_EMU_SIM_IMAGE", f"ghcr.io/raisga/p4n4-sensor-sim:{__version__}"
+)
 _SIM_CONTAINER = "p4n4-sensor-sim"
-_ROOT = Path(__file__).parent.parent.parent
+_PACKAGE = Path(__file__).parent.parent
 
 
 def start_simulator(
@@ -29,22 +37,13 @@ def start_simulator(
     rebuild: bool = False,
     broker_timeout: float = 60.0,
 ) -> int:
-    """Build the image if needed, wait for the broker, and run the simulator.
+    """Get the image if needed, wait for the broker, and run the simulator.
 
     Returns the exit code of the failing step, or 0 on success.
     """
-    sim_dir = Path(__file__).parent.parent / "sim"
-
-    if rebuild or not _image_exists():
-        console.print(f"[cyan]Building {_SIM_IMAGE} image...[/cyan]")
-        rc = subprocess.run(
-            ["docker", "build", "-t", _SIM_IMAGE, "-f", str(sim_dir / "Dockerfile"), "."],
-            cwd=str(_ROOT),
-            check=False,
-        ).returncode
-        if rc != 0:
-            console.print("[red]Failed to build sensor-sim image.[/red]")
-            return rc
+    rc = ensure_image(rebuild=rebuild)
+    if rc != 0:
+        return rc
 
     if not _wait_for_broker(broker.container, broker_timeout):
         console.print(
@@ -64,7 +63,7 @@ def start_simulator(
             "-e", f"MQTT_HOST={broker.host}",
             "-e", f"SIM_INTERVAL_SEC={interval}",
             "-e", f"SIM_DEVICE_COUNT={devices}",
-            _SIM_IMAGE,
+            SIM_IMAGE,
         ],
         check=False,
     ).returncode
@@ -149,9 +148,46 @@ def project_broker(stack_dir: Path | None = None) -> Broker:
     return find_broker(load_config(cwd)) if cwd is not None else DEFAULT_BROKER_INFO
 
 
+def ensure_image(*, rebuild: bool = False) -> int:
+    """Make the simulator image available: the local one, else the published one, else a build.
+
+    The build is the fallback for a version or platform that isn't published, and what
+    --rebuild does, e.g. to try changes to the simulator itself.
+    """
+    if not rebuild:
+        if _image_exists():
+            return 0
+        console.print(f"[cyan]Pulling {SIM_IMAGE}...[/cyan]")
+        pulled = subprocess.run(["docker", "pull", SIM_IMAGE], capture_output=True, check=False)
+        if pulled.returncode == 0:
+            return 0
+        console.print("[dim]Not published for this version or platform; building it.[/dim]")
+    return _build_image()
+
+
+def _build_image() -> int:
+    """Build the image from the installed package, wheel or source checkout alike.
+
+    The context is a copy of the package alone: the package's parent is site-packages
+    when p4n4-emu is installed from a wheel, far too much to send to the daemon.
+    """
+    console.print(f"[cyan]Building {SIM_IMAGE}...[/cyan]")
+    with tempfile.TemporaryDirectory(prefix="p4n4-emu-sim-") as context:
+        package = Path(context) / "p4n4_emu"
+        shutil.copytree(_PACKAGE, package, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        rc = subprocess.run(
+            ["docker", "build", "-t", SIM_IMAGE, "-f", str(package / "sim" / "Dockerfile"),
+             context],
+            check=False,
+        ).returncode
+    if rc != 0:
+        console.print("[red]Failed to build the sensor-sim image.[/red]")
+    return rc
+
+
 def _image_exists() -> bool:
     r = subprocess.run(
-        ["docker", "image", "inspect", _SIM_IMAGE],
+        ["docker", "image", "inspect", SIM_IMAGE],
         capture_output=True,
         check=False,
     )
