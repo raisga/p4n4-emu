@@ -11,7 +11,7 @@ from p4n4_emu.commands import down, logs, setup, sim, status, up
 from p4n4_emu.overlays import paths
 from p4n4_emu.overlays.generator import render_overlay
 from p4n4_emu.profiles.loader import load_profile
-from p4n4_emu.utils import preflight, usage
+from p4n4_emu.utils import preflight, stack_config, usage
 
 runner = CliRunner()
 
@@ -25,7 +25,11 @@ def stack_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "OVERLAY_ROOT", tmp_path / "overlays")
     monkeypatch.setattr(up, "detect_block_device", lambda: None)
     monkeypatch.setattr(up.dc, "list_services", lambda cwd: ["mqtt", "influxdb"])
-    monkeypatch.setattr(up.dc, "up", lambda cwd, overlay=None: 0)
+    monkeypatch.setattr(up.dc, "up", lambda cwd, overlay=None, **kw: 0)
+    monkeypatch.setattr(up.dc, "ps", lambda cwd, overlay=None: [])
+    monkeypatch.setattr(up.dc, "ensure_network", lambda *a, **kw: None)
+    monkeypatch.setattr(up, "load_config", lambda cwd: None)
+    monkeypatch.setattr(sim, "load_config", lambda cwd: None)
     monkeypatch.setattr(preflight._platform, "machine", lambda: "x86_64")
     return tmp_path
 
@@ -100,7 +104,9 @@ def test_up_sim_uses_shared_start_with_options(stack_dir, preflight_calls, monke
          "--sim-interval", "0.5", "--sim-devices", "3"],
     )
     assert result.exit_code == 0, result.output
-    assert calls == [{"interval": 0.5, "devices": 3}]
+    assert calls == [
+        {"interval": 0.5, "devices": 3, "broker": stack_config.DEFAULT_BROKER_INFO}
+    ]
 
 
 def test_start_simulator_builds_before_running(monkeypatch):
@@ -202,7 +208,7 @@ def test_up_in_two_projects_writes_two_overlays(tmp_path, monkeypatch, preflight
     monkeypatch.setattr(paths, "OVERLAY_ROOT", tmp_path / "overlays")
     monkeypatch.setattr(up, "detect_block_device", lambda: None)
     monkeypatch.setattr(up.dc, "list_services", lambda cwd: ["mqtt"])
-    monkeypatch.setattr(up.dc, "up", lambda cwd, overlay=None: 0)
+    monkeypatch.setattr(up.dc, "up", lambda cwd, overlay=None, **kw: 0)
     for project, profile in (("a", "rpi5"), ("b", "nuc")):
         (tmp_path / project).mkdir()
         (tmp_path / project / "docker-compose.yml").write_text("services:\n  mqtt: {}\n")
@@ -386,3 +392,236 @@ def test_setup_check_only_fails_when_qemu_missing(monkeypatch):
     monkeypatch.setattr(setup, "run_preflight", lambda **kw: ["QEMU binfmt ... missing"])
     result = runner.invoke(app, ["setup", "--arch", "arm64", "--check-only"])
     assert result.exit_code == 1
+
+
+# ── shared networks and the broker come from the compose config ───────────────
+
+def test_up_creates_the_networks_the_config_names(stack_dir, preflight_calls, monkeypatch):
+    config = {
+        "name": "plant",
+        "networks": {"bus": {"name": "plant-bus", "ipam": {"config": [{"subnet": "10.9.0.0/16"}]}}},
+        "services": {"mqtt": {"container_name": "plant-mqtt", "networks": {"bus": None}}},
+    }
+    networks, sims = [], []
+    monkeypatch.setattr(up, "load_config", lambda cwd: config)
+    monkeypatch.setattr(up.dc, "ensure_network", lambda *a, **kw: networks.append((a, kw)))
+    monkeypatch.setattr(up, "start_simulator", lambda **kw: sims.append(kw) or 0)
+    result = runner.invoke(app, ["up", "--native", "--stack-dir", str(stack_dir), "--sim"])
+    assert result.exit_code == 0, result.output
+    assert networks == [(("plant-bus", "10.9.0.0/16", "bus"), {"owned": True})]
+    assert sims[0]["broker"] == stack_config.Broker("plant-mqtt", "plant-mqtt", "plant-bus")
+
+
+def test_sim_start_options_override_the_project_broker(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sim, "project_broker", lambda: stack_config.Broker("a", "a", "net-a"))
+    monkeypatch.setattr(sim, "start_simulator", lambda **kw: calls.append(kw) or 0)
+    result = runner.invoke(app, ["sim", "start", "--network", "net-b"])
+    assert result.exit_code == 0, result.output
+    assert calls[0]["broker"] == stack_config.Broker("a", "a", "net-b")
+
+
+# ── up: rollback when a later stack fails ─────────────────────────────────────
+
+@pytest.fixture
+def multi_project(tmp_path, monkeypatch):
+    """A multi-layer project (iot, ai, edge) whose ai stack fails to start."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("COMPOSE_FILE", raising=False)
+    (tmp_path / ".p4n4.json").write_text('{"project": "p", "layers": ["iot", "ai", "edge"]}')
+    for name in ("iot", "ai", "edge"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "docker-compose.yml").write_text("services:\n  svc: {}\n")
+    monkeypatch.setattr(paths, "OVERLAY_ROOT", tmp_path / "overlays")
+    monkeypatch.setattr(up, "detect_block_device", lambda: None)
+    monkeypatch.setattr(up, "check_or_exit", lambda **kw: None)
+    monkeypatch.setattr(up, "load_config", lambda cwd: None)
+    monkeypatch.setattr(up.dc, "list_services", lambda cwd: ["svc"])
+    monkeypatch.setattr(up.dc, "ensure_network", lambda *a, **kw: None)
+    events = []
+    monkeypatch.setattr(
+        up.dc, "up", lambda cwd, overlay=None, **kw: events.append(("up", cwd.name)) or (
+            1 if cwd.name == "ai" else 0
+        )
+    )
+    monkeypatch.setattr(
+        up.dc, "down", lambda cwd, overlay=None: events.append(("down", cwd.name)) or 0
+    )
+    return tmp_path, events
+
+
+def test_up_rolls_back_stacks_it_started(multi_project, monkeypatch):
+    root, events = multi_project
+    monkeypatch.setattr(up.dc, "ps", lambda cwd, overlay=None: [])
+    result = runner.invoke(app, ["up", "--native", "--stack", "all"])
+    assert result.exit_code == 1
+    # ai failed half-way: it and iot go down, dependents first; edge never starts
+    assert events == [("up", "iot"), ("up", "ai"), ("down", "ai"), ("down", "iot")]
+    assert paths.existing_overlay(root / "iot", "iot") is None
+
+
+def test_up_rollback_keeps_stacks_that_were_running(multi_project, monkeypatch):
+    root, events = multi_project
+    monkeypatch.setattr(
+        up.dc, "ps",
+        lambda cwd, overlay=None: [{"State": "running"}] if cwd.name == "iot" else [],
+    )
+    result = runner.invoke(app, ["up", "--native", "--stack", "all"])
+    assert result.exit_code == 1
+    assert events == [("up", "iot"), ("up", "ai"), ("down", "ai")]
+    assert paths.existing_overlay(root / "iot", "iot") is not None
+
+
+def test_up_missing_stack_starts_nothing(multi_project, monkeypatch):
+    root, events = multi_project
+    (root / "edge" / "docker-compose.yml").unlink()
+    monkeypatch.setattr(up.dc, "ps", lambda cwd, overlay=None: [])
+    result = runner.invoke(app, ["up", "--native", "--stack", "iot,edge"])
+    assert result.exit_code == 1
+    assert events == []
+
+
+def test_setup_skips_install_when_qemu_is_available(monkeypatch):
+    # e.g. Docker Desktop, whose VM registers QEMU itself
+    monkeypatch.setattr(preflight._platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(setup, "run_preflight", lambda **kw: [])
+    installs = []
+    monkeypatch.setattr(setup, "_install_binfmt", lambda p: installs.append(p))
+    result = runner.invoke(app, ["setup", "--arch", "arm64"])
+    assert result.exit_code == 0, result.output
+    assert installs == []
+
+
+# ── --json ────────────────────────────────────────────────────────────────────
+
+def test_status_json(status_env, tmp_path):
+    import json
+
+    overlay = _write_overlay(tmp_path / "iot")
+    status_env["ps"] = [
+        {**_MQTT, "Publishers": [
+            {"PublishedPort": 1883, "TargetPort": 1883, "Protocol": "tcp"},
+            {"PublishedPort": 1883, "TargetPort": 1883, "Protocol": "tcp"},
+        ]},
+    ]
+    status_env["applied"] = {"p4n4-mqtt": usage.Limits(cpus=1.0)}
+    status_env["usage"] = {"p4n4-mqtt": usage.Usage(cpus=0.12, memory=1024)}
+    result = runner.invoke(app, ["status", "--stack", "iot", "--json"])
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.output)
+    assert list(doc["profiles"]) == ["rpi5"]
+    assert doc["profiles"]["rpi5"]["cpus"] == 4.0
+    assert doc["stale"] is True and doc["cgroup_v2"] is True
+    (stack,) = doc["stacks"]
+    assert stack["stack"] == "iot" and stack["profile"] == "rpi5"
+    (svc,) = stack["services"]
+    want = usage.expected_limits(yaml.safe_load(overlay.read_text()))["mqtt"]
+    assert svc["expected"]["cpus"] == want.cpus
+    assert svc["limits"]["cpus"] == 1.0
+    assert svc["limits_state"] == "stale"
+    assert svc["differences"][0] == f"cpus 1.00 ≠ {want.cpus:.2f}"
+    assert svc["usage"] == {"cpus": 0.12, "memory": 1024}
+    assert svc["ports"] == [{"published": 1883, "target": 1883, "protocol": "tcp"}]
+
+
+def test_status_json_without_overlay(status_env):
+    import json
+
+    doc = json.loads(runner.invoke(app, ["status", "--stack", "iot", "--json"]).output)
+    assert doc["profiles"] == {}
+    assert doc["stacks"][0]["profile"] is None
+    assert doc["stacks"][0]["services"][0]["limits_state"] == "none"
+
+
+def test_status_unknown_profile_fails(status_env):
+    assert _status("--profile", "nope").exit_code == 1
+
+
+def test_profile_json():
+    import json
+
+    shown = json.loads(runner.invoke(app, ["profile", "show", "rpi5", "--json"]).output)
+    assert shown["name"] == "rpi5" and shown["is_arm"] is True
+    assert shown["memory_bytes"] == 7168 * 1024**2
+    listed = json.loads(runner.invoke(app, ["profile", "list", "--json"]).output)
+    assert "rpi5" in {p["name"] for p in listed}
+
+
+def test_profile_show_unknown_fails():
+    result = runner.invoke(app, ["profile", "show", "nope"])
+    assert result.exit_code == 1
+
+
+# ── profile switch ────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def switch_env(status_env, tmp_path, monkeypatch):
+    """The status_env iot stack, with `docker update` calls recorded."""
+    from p4n4_emu.commands import profile
+
+    monkeypatch.setattr(profile, "detect_block_device", lambda: None)
+    monkeypatch.setattr(profile.dc, "ps", lambda cwd, overlay=None: status_env["ps"])
+    monkeypatch.setattr(up.dc, "list_services", lambda cwd: ["mqtt"])
+    updates = []
+
+    def run(cmd, **kw):
+        updates.append(cmd)
+        return subprocess.CompletedProcess(cmd, status_env.get("update_rc", 0), stderr="nope")
+
+    monkeypatch.setattr(profile.subprocess, "run", run)
+    return updates
+
+
+def test_profile_switch_updates_limits_in_place(switch_env, tmp_path):
+    _write_overlay(tmp_path / "iot", profile="nuc")
+    paths_doc = paths.read_overlay(paths.existing_overlay(tmp_path / "iot", "iot"))
+    assert paths_doc["x-p4n4-emu"]["profile"] == "nuc"
+    result = runner.invoke(app, ["profile", "switch", "mcu-class", "--stack", "iot"])
+    assert result.exit_code == 0, result.output
+    (cmd,) = switch_env
+    assert cmd[:2] == ["docker", "update"] and cmd[-1] == "p4n4-mqtt"
+    assert "--cpus" in cmd and "--memory" in cmd and "--memory-swap" in cmd
+    doc = paths.read_overlay(paths.existing_overlay(tmp_path / "iot", "iot"))
+    assert doc["x-p4n4-emu"]["profile"] == "mcu-class"
+    want = usage.expected_limits(doc)["mqtt"]
+    assert cmd[cmd.index("--memory") + 1] == str(want.memory)
+
+
+def test_profile_switch_refuses_an_architecture_change(switch_env, tmp_path):
+    _write_overlay(tmp_path / "iot", profile="rpi5")  # rendered with linux/arm64
+    result = runner.invoke(app, ["profile", "switch", "nuc", "--stack", "iot"])
+    assert result.exit_code == 1
+    assert switch_env == []
+
+
+def test_profile_switch_without_running_stacks(switch_env):
+    result = runner.invoke(app, ["profile", "switch", "rpi5", "--stack", "iot"])
+    assert result.exit_code == 1
+    assert switch_env == []
+
+
+def test_profile_switch_reports_failed_updates(switch_env, status_env, tmp_path):
+    status_env["update_rc"] = 1
+    _write_overlay(tmp_path / "iot", profile="nuc")
+    result = runner.invoke(app, ["profile", "switch", "mcu-class", "--stack", "iot"])
+    assert result.exit_code == 1
+
+
+def test_up_passes_build_and_pull(stack_dir, preflight_calls, monkeypatch):
+    calls = []
+    monkeypatch.setattr(up.dc, "up", lambda cwd, overlay=None, **kw: calls.append(kw) or 0)
+    result = runner.invoke(
+        app, ["up", "--native", "--stack-dir", str(stack_dir), "--build", "--pull"]
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == [{"build": True, "pull": True}]
+
+
+def test_down_yes_skips_the_volume_prompt(down_calls, tmp_path, monkeypatch):
+    used = []
+    monkeypatch.setattr(
+        down.dc, "down", lambda cwd, overlay=None, volumes=False: used.append(volumes) or 0
+    )
+    result = runner.invoke(app, ["down", "--stack", "iot", "--volumes", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert used == [True]

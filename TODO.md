@@ -23,8 +23,11 @@ emulation · **P2** quality-of-life · **P3** stretch.
 - [x] Fix the install path in the README (`~/p4n4/demo/emu` → `~/p4n4/tools/emu`). The docs
       now install with `uv tool install --editable .`: `uv run p4n4-emu` only works inside
       `tools/emu`, not from a p4n4 project.
-- [ ] Replace the mirrored layout logic in `p4n4_emu/utils/project.py` with `p4n4-lib`
-      once it is on PyPI (root `TODO.md` task 10).
+- [x] Replace the mirrored layout logic in `p4n4_emu/utils/project.py` with `p4n4-lib`
+      (0.2.0, from PyPI): manifest lookup and layer order come from it. Directory
+      resolution stays in emu, because `p4n4_lib.layout` only knows `docker-compose.yml`.
+      `ensure_network` and the `p4n4-net` subnet move to it once a lib release includes
+      `compose.ensure_network` with the recreate-when-unused fix (section 6).
 
 ## 1. Correctness bugs (P0) — fixed 2026-10-01
 
@@ -185,20 +188,33 @@ Line numbers below refer to the code before the fix.
       gets a warning.
 - [x] Add a `logs` command, with the main CLI's `--tail` / `--no-follow` / `--stack` behaviour.
       A service name selects the stack that defines it.
-- [ ] `profile switch <name>`: re-apply limits to running containers with `docker update`,
-      without recreating them.
-- [ ] Roll back stacks already started when a later stack in `--stack all` fails.
-- [ ] Do not hardcode `p4n4-net` / `p4n4-mqtt`. Read them from the project's compose config.
-- [ ] Preflight on Docker Desktop (macOS / Windows): read `docker info` →
+- [x] `profile switch <name>`: re-apply limits to running containers with `docker update`,
+      without recreating them. CPU and memory only: `docker update` can't change disk rates
+      (status shows them stale until the next `up`) or the image architecture (refused).
+- [x] Roll back stacks already started when a later stack in `--stack all` fails. Only the
+      stacks this run started (the failed one included) are stopped; ones already running
+      stay up. Every stack directory is resolved before any starts.
+- [x] Do not hardcode `p4n4-net` / `p4n4-mqtt`. Read them from the project's compose config
+      (`utils/stack_config.py`): `up` creates the named networks a stack declares (labelled
+      with their compose key; external ones only when missing), and the simulator joins the
+      iot broker's network. `sim start --mqtt-host` / `--network` override them.
+- [x] Preflight on Docker Desktop (macOS / Windows): read `docker info` →
       `CgroupVersion` / `CgroupDriver` instead of the host's `/sys/fs/cgroup`
-      (`utils/preflight.py:46`). The host path is meaningless when Docker runs in a VM.
-- [ ] `--json` output for `status` and `profile` so CI and the p4n4 CLI / API can consume it.
-- [ ] Integration point with the main `p4n4` CLI (for example `p4n4 up --emu rpi5`).
+      (`utils/docker_host.py`), and warn on the `none` driver (rootless without delegation).
+      Docker Desktop's VM ships QEMU, so the host binfmt check and `setup`'s install are
+      skipped there. Block device detection on Desktop is still open (section 2, Storage).
+- [x] `--json` output for `status` and `profile` so CI and the p4n4 CLI / API can consume it.
+      `status --json` gives per-service state, usage, applied and expected limits, a
+      `limits_state` (`applied` / `stale` / `not-in-overlay` / `none` / `external`) and the
+      differences; the exit code stays 0, and `stale` is a top-level field.
+- [x] Integration point with the main `p4n4` CLI: `p4n4 up --emu rpi5` shells out to
+      `p4n4-emu up` (with `--build` / `--pull`), and `p4n4 down` hands stacks whose
+      containers were created with an `.emu.yml` overlay to `p4n4-emu down --yes`.
 
 ## 7. Testing and CI (P2)
 
-- [ ] CLI tests with `typer.testing.CliRunner` and mocked `subprocess`. `up`, `down`, `logs`,
-      `status`, `setup` and `sim` have them (`tests/test_commands.py`); `profile` doesn't.
+- [x] CLI tests with `typer.testing.CliRunner` and mocked `subprocess`. `up`, `down`, `logs`,
+      `status`, `setup`, `sim` and `profile` have them (`tests/test_commands.py`).
 - [ ] Overlay tests that render every template against every profile and check the result with
       `docker compose config` against the real stacks in `../../stacks/*`.
 - [ ] Integration job (marked, opt-in) that starts the iot stack under `mcu-class`, runs the simulator,

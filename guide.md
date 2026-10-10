@@ -394,6 +394,7 @@ p4n4-emu setup [--arch arm64]
 # Inspect profiles
 p4n4-emu profile list
 p4n4-emu profile show <name>
+p4n4-emu profile switch <name>   # new CPU / memory limits, no restart
 
 # Start / stop
 p4n4-emu up   --profile <profile> --stack <stack> --stack-dir <path> [--sim]
@@ -406,7 +407,7 @@ p4n4-emu status --stack <stack> --stack-dir <path>
 p4n4-emu logs [SERVICE] --stack <stack> [--tail 100] [--no-follow]
 
 # Simulator only
-p4n4-emu sim start [--interval 2.0] [--devices 1] [--mqtt-host p4n4-mqtt]
+p4n4-emu sim start [--interval 2.0] [--devices 1] [--mqtt-host HOST] [--network NAME]
 p4n4-emu sim stop
 p4n4-emu sim status
 

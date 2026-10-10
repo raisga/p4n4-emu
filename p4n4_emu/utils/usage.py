@@ -13,7 +13,6 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 
 _UNITS = {
     "": 1,
@@ -169,8 +168,3 @@ def differences(expected: Limits, applied: Limits) -> list[str]:
             have_text = format_size(have) + unit if have is not None else "none"
             out.append(f"{label} {have_text} ≠ {format_size(want)}{unit}")
     return out
-
-
-def cgroup_v2() -> bool:
-    """Whether this host uses cgroup v2, without which limits are set but not enforced."""
-    return Path("/sys/fs/cgroup/cgroup.controllers").exists()

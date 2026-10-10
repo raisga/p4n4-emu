@@ -8,8 +8,10 @@ Understands three source layouts:
    each layer its own subdirectory (``<project>/iot/``, ``<project>/ai/``).
 3. Bare stack checkouts relative to the current directory (legacy fallback).
 
-The p4n4 layout rules mirror ``p4n4_lib.layout`` so the emulator resolves
-projects exactly like the p4n4 CLI does.
+Manifest lookup and layer order come from ``p4n4_lib`` so the emulator resolves
+projects exactly like the p4n4 CLI does. Directory resolution stays here:
+``p4n4_lib.layout`` only recognises ``docker-compose.yml``, while the emulator
+accepts every base file name Docker Compose does.
 """
 
 from __future__ import annotations
@@ -17,11 +19,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-MANIFEST_FILE = ".p4n4.json"
+from p4n4_lib import layout, manifest
+from p4n4_lib.layers import LAYER_NAMES
+
 # Base file names in the order Docker Compose looks for them
 COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
-# Dependency order, as in p4n4_lib.layers: the dashboard starts last
-STACKS = ("iot", "ai", "edge", "dashboard")
+# Dependency order: the dashboard starts last
+STACKS = LAYER_NAMES
 
 
 def find_compose_file(directory: Path) -> Path | None:
@@ -35,21 +39,16 @@ def find_compose_file(directory: Path) -> Path | None:
 
 def find_manifest(start: Path | None = None) -> Path | None:
     """Walk up from start (default cwd) to find .p4n4.json."""
-    current = (start or Path.cwd()).resolve()
-    for directory in [current, *current.parents]:
-        candidate = directory / MANIFEST_FILE
-        if candidate.exists():
-            return candidate
-    return None
+    return manifest.find(start)
 
 
 def manifest_layers(manifest_path: Path) -> list[str]:
     """Known stack layers enabled in a project manifest, in dependency order."""
     try:
-        layers = json.loads(manifest_path.read_text()).get("layers", [])
-    except (OSError, json.JSONDecodeError):
+        layers = manifest.load(manifest_path).get("layers", [])
+    except (OSError, json.JSONDecodeError, AttributeError):
         return []
-    return [name for name in STACKS if name in layers]
+    return layout.ordered(layers)
 
 
 def expand_stacks(stack: str | None, start: Path | None = None) -> list[str]:
@@ -86,7 +85,7 @@ def resolve_stack_dir(base: Path | None, stack: str, start: Path | None = None) 
             return None
         if find_compose_file(root):
             # Flat single-layer layout: the root compose belongs to the first
-            # enabled layer only (mirrors p4n4_lib.layout.compose_dirs)
+            # enabled layer only (as p4n4_lib.layout.compose_dirs does)
             return root if stack == layers[0] else None
         layer_dir = root / stack
         return layer_dir if find_compose_file(layer_dir) else None

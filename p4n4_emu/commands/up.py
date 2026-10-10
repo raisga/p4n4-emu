@@ -9,7 +9,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from p4n4_emu.commands.sim import start_simulator
+from p4n4_emu.commands.sim import project_broker, start_simulator
 from p4n4_emu.overlays.generator import (
     Scale,
     Share,
@@ -18,7 +18,7 @@ from p4n4_emu.overlays.generator import (
     render_overlay,
     service_shares,
 )
-from p4n4_emu.overlays.paths import overlay_path
+from p4n4_emu.overlays.paths import existing_overlay, overlay_path, remove_overlay
 from p4n4_emu.profiles.loader import Profile, load_profile
 from p4n4_emu.utils import compose as dc
 from p4n4_emu.utils.docker_info import detect_block_device
@@ -30,6 +30,7 @@ from p4n4_emu.utils.project import (
     manifest_layers,
     resolve_stack_dir,
 )
+from p4n4_emu.utils.stack_config import Broker, find_broker, load_config, shared_networks
 
 console = Console()
 
@@ -46,14 +47,14 @@ def resolve_platform(prof: Profile, arch: str, native: bool) -> str | None:
     return docker_platform(prof.arch) if prof.is_arm else None
 
 
-def _stack_shares(stack: str, stack_dir: Path | None) -> dict[str, Share]:
+def stack_shares(stack: str, stack_dir: Path | None) -> dict[str, Share]:
     """Shares for the services actually defined in *stack*'s compose config."""
     cwd = resolve_stack_dir(stack_dir, stack)
     services = dc.list_services(cwd) if cwd is not None else None
     return service_shares(stack, services)
 
 
-def _budget_stacks(stacks_to_run: list[str]) -> list[str]:
+def budget_stacks(stacks_to_run: list[str]) -> list[str]:
     """Stacks that share the device: the ones starting now plus the project's enabled ones."""
     manifest = find_manifest()
     enabled = manifest_layers(manifest) if manifest else []
@@ -99,6 +100,10 @@ def cmd(
     sim_devices: Annotated[
         int, typer.Option("--sim-devices", help="Number of simulated sensor devices.")
     ] = 1,
+    build: Annotated[bool, typer.Option("--build", help="Rebuild images before starting.")] = False,
+    pull: Annotated[
+        bool, typer.Option("--pull", help="Pull the latest images before starting.")
+    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Print commands without executing.")
     ] = False,
@@ -135,9 +140,11 @@ def cmd(
 
     # All stacks of the project run on one device, so their combined limits must
     # fit within the profile even when they are started one at a time.
-    shares = {s: _stack_shares(s, stack_dir) for s in _budget_stacks(stacks_to_run)}
+    shares = {s: stack_shares(s, stack_dir) for s in budget_stacks(stacks_to_run)}
     scale = budget_scale(shares.values())
 
+    # Resolve every stack before starting any, so a missing one starts nothing
+    dirs = []
     for s in stacks_to_run:
         cwd = resolve_stack_dir(stack_dir, s)
         if cwd is None:
@@ -146,7 +153,11 @@ def cmd(
                 "Run inside a p4n4 project, or use --stack-dir."
             )
             raise typer.Exit(1)
+        dirs.append((s, cwd))
 
+    broker_info: Broker | None = None
+    started: list[tuple[str, Path]] = []  # stacks this run started, to roll back
+    for s, cwd in dirs:
         overlay_content = render_overlay(
             prof,
             s,
@@ -164,20 +175,56 @@ def cmd(
             console.print(f"\n[dim]Would run in {cwd}: {command} up -d[/dim]")
             continue
 
+        was_running = _is_running(cwd, s)
         overlay_file.parent.mkdir(parents=True, exist_ok=True)
         overlay_file.write_text(overlay_content)
+        config = load_config(cwd)
+        for net in shared_networks(config):
+            dc.ensure_network(
+                net.name, net.subnet or dc.NETWORK_SUBNET, net.label, owned=not net.external
+            )
+        if s == "iot":
+            broker_info = find_broker(config)
         console.print(f"[cyan]Starting {s} stack[/cyan] with profile [bold]{prof.name}[/bold]…")
-        rc = dc.up(cwd, overlay=overlay_file)
+        rc = dc.up(cwd, overlay=overlay_file, build=build, pull=pull)
+        if not was_running:
+            # A failed `up` can leave some of the stack's containers running
+            started.append((s, cwd))
         if rc != 0:
+            _roll_back(started)
             raise typer.Exit(rc)
 
     if sim and not dry_run:
-        rc = start_simulator(interval=sim_interval, devices=sim_devices)
+        rc = start_simulator(
+            interval=sim_interval,
+            devices=sim_devices,
+            broker=broker_info or project_broker(stack_dir),
+        )
         if rc != 0:
             raise typer.Exit(rc)
 
     if not dry_run:
         _print_summary(prof, blkio_device, stacks_to_run, platform, scale)
+
+
+def _is_running(cwd: Path, stack: str) -> bool:
+    """Whether any of the stack's containers runs already."""
+    containers = dc.ps(cwd, overlay=existing_overlay(cwd, stack))
+    return any(c.get("State") == "running" for c in containers)
+
+
+def _roll_back(started: list[tuple[str, Path]]) -> None:
+    """Stop the stacks this run started, dependents first, and drop their overlays.
+
+    Stacks that were running before are left as they are: the device would otherwise
+    lose services the failed start had nothing to do with.
+    """
+    for s, cwd in reversed(started):
+        console.print(f"[yellow]Rolling back: stopping the {s} stack…[/yellow]")
+        if dc.down(cwd, overlay=existing_overlay(cwd, s)) == 0:
+            remove_overlay(cwd, s)
+        else:
+            console.print(f"[red]Could not stop the {s} stack; stop it with p4n4-emu down.[/red]")
 
 
 def _print_summary(

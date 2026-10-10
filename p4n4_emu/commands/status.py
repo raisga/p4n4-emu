@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
 
@@ -12,13 +14,13 @@ from rich.table import Table
 from p4n4_emu.overlays.paths import META_KEY, existing_overlay, read_overlay
 from p4n4_emu.profiles.loader import Profile, load_profile
 from p4n4_emu.utils import compose as dc
+from p4n4_emu.utils.docker_host import cgroup_v2
 from p4n4_emu.utils.docker_info import detect_block_device
 from p4n4_emu.utils.project import expand_stacks, resolve_stack_dir
 from p4n4_emu.utils.usage import (
     Limits,
     Usage,
     applied_limits,
-    cgroup_v2,
     differences,
     expected_limits,
     format_size,
@@ -53,8 +55,18 @@ def cmd(
         Path | None,
         typer.Option("--stack-dir", help="Directory containing the stack's compose file."),
     ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print JSON instead of tables, for scripts and CI.")
+    ] = False,
 ) -> None:
     """Show the active profile, and each service's usage against its limits."""
+    if profile:
+        try:
+            load_profile(profile)
+        except ValueError as e:
+            Console(stderr=True).print(f"[red]{e}[/red]")
+            raise typer.Exit(1) from e
+
     stacks = []  # (stack, compose dir, overlay dict or None)
     for s in expand_stacks(stack):
         cwd = resolve_stack_dir(stack_dir, s)
@@ -65,6 +77,19 @@ def cmd(
 
     active = {s: _profile_of(overlay) for s, _, overlay in stacks if overlay}
     shown = [profile] if profile else sorted(set(filter(None, active.values())))
+    containers = {s: dc.ps(cwd, overlay=existing_overlay(cwd, s)) for s, cwd, _ in stacks}
+    names = [c["Name"] for svcs in containers.values() for c in svcs if c.get("Name")]
+    running = [
+        c["Name"] for svcs in containers.values() for c in svcs
+        if c.get("Name") and c.get("State") == "running"
+    ]
+    applied = applied_limits(names)
+    usage = live_usage(running)
+
+    if as_json:
+        _print_json(stacks, active, shown, containers, applied, usage)
+        return
+
     for name in shown:
         try:
             _print_profile(load_profile(name))
@@ -80,15 +105,6 @@ def cmd(
         for s, name in active.items():
             if name != profile:
                 console.print(f"[yellow]The {s} stack runs under {name}, not {profile}.[/yellow]")
-
-    containers = {s: dc.ps(cwd, overlay=existing_overlay(cwd, s)) for s, cwd, _ in stacks}
-    names = [c["Name"] for svcs in containers.values() for c in svcs if c.get("Name")]
-    running = [
-        c["Name"] for svcs in containers.values() for c in svcs
-        if c.get("Name") and c.get("State") == "running"
-    ]
-    applied = applied_limits(names)
-    usage = live_usage(running)
 
     stale = False
     for s, _, overlay in stacks:
@@ -152,19 +168,39 @@ def _usage_cells(use: Usage | None, lim: Limits) -> tuple[str, str]:
     return cpu, mem
 
 
+def _limits_state(
+    service: str, expected: dict[str, Limits] | None, lim: Limits
+) -> tuple[str, list[str]]:
+    """Whether the container has the limits its overlay asks for, and what differs.
+
+    One of "applied", "stale", "not-in-overlay" (added to the compose file after `up`
+    wrote the overlay), "none" (no overlay, no limits) or "external" (limits that
+    p4n4-emu didn't set).
+    """
+    if expected is None:
+        return ("none" if lim == Limits() else "external"), []
+    if service not in expected:
+        return "not-in-overlay", []
+    diff = differences(expected[service], lim)
+    return ("stale" if diff else "applied"), diff
+
+
+_LIMITS_CELLS = {
+    "applied": "[green]applied[/green]",
+    "not-in-overlay": "[yellow]none: not in overlay[/yellow]",
+    "none": "[dim]none[/dim]",
+    "external": "[dim]not from p4n4-emu[/dim]",
+}
+
+
 def _limits_cell(
     service: str, expected: dict[str, Limits] | None, lim: Limits
 ) -> tuple[str, bool]:
-    """Whether the container has the limits its overlay asks for, and if they're stale."""
-    if expected is None:
-        return ("[dim]none[/dim]" if lim == Limits() else "[dim]not from p4n4-emu[/dim]"), False
-    if service not in expected:
-        # Added to the compose file after `up` wrote the overlay
-        return "[yellow]none: not in overlay[/yellow]", True
-    diff = differences(expected[service], lim)
-    if diff:
+    """The Limits cell, and whether the container's limits are stale."""
+    state, diff = _limits_state(service, expected, lim)
+    if state == "stale":
         return "[red]stale:[/red] " + "; ".join(diff), True
-    return "[green]applied[/green]", False
+    return _LIMITS_CELLS[state], state == "not-in-overlay"
 
 
 def _stack_table(
@@ -216,15 +252,74 @@ def _stack_table(
     return table, stale
 
 
-def _ports(svc: dict) -> str:
-    ports_raw = svc.get("Publishers") or []
-    ports: list[str] = []
-    for p in ports_raw if isinstance(ports_raw, list) else []:
-        pub = p.get("PublishedPort", 0)
-        tgt = p.get("TargetPort", 0)
-        proto = p.get("Protocol", "tcp")
-        port = f"{pub}→{tgt}/{proto}"
-        # Docker lists a port once per address family (0.0.0.0 and ::)
-        if pub and port not in ports:
+def _print_json(
+    stacks: list[tuple[str, Path, dict | None]],
+    active: dict[str, str | None],
+    shown: list[str],
+    containers: dict[str, list[dict]],
+    applied: dict[str, Limits],
+    usage: dict[str, Usage],
+) -> None:
+    """Everything the tables show, as one JSON document on stdout."""
+    profiles = {}
+    for name in shown:
+        try:
+            profiles[name] = load_profile(name).as_dict()
+        except ValueError:
+            profiles[name] = None  # an overlay from a profile since removed
+
+    out_stacks, stale = [], False
+    for s, cwd, overlay in stacks:
+        expected = expected_limits(overlay) if overlay else None
+        services = []
+        for svc in containers[s]:
+            name = svc.get("Service") or svc.get("Name", "?")
+            container = svc.get("Name", "")
+            lim = applied.get(container, Limits())
+            state, diff = _limits_state(name, expected, lim)
+            stale = stale or state in ("stale", "not-in-overlay")
+            use = usage.get(container)
+            services.append({
+                "service": name,
+                "container": container,
+                "state": svc.get("State"),
+                "health": svc.get("Health") or None,
+                "usage": asdict(use) if use else None,
+                "limits": asdict(lim),
+                "expected": asdict(expected[name]) if expected and name in expected else None,
+                "limits_state": state,
+                "differences": diff,
+                "ports": _port_list(svc),
+            })
+        out_stacks.append({
+            "stack": s,
+            "dir": str(cwd),
+            "profile": active.get(s),
+            "services": services,
+        })
+
+    typer.echo(json.dumps({
+        "profiles": profiles,
+        "stacks": out_stacks,
+        "stale": stale,
+        "cgroup_v2": cgroup_v2(),
+    }, indent=2, ensure_ascii=False))
+
+
+def _port_list(svc: dict) -> list[dict]:
+    """Published ports, once each (Docker lists one per address family)."""
+    ports: list[dict] = []
+    publishers = svc.get("Publishers")
+    for p in publishers if isinstance(publishers, list) else []:
+        port = {
+            "published": p.get("PublishedPort", 0),
+            "target": p.get("TargetPort", 0),
+            "protocol": p.get("Protocol", "tcp"),
+        }
+        if port["published"] and port not in ports:
             ports.append(port)
-    return ", ".join(ports)
+    return ports
+
+
+def _ports(svc: dict) -> str:
+    return ", ".join(f"{p['published']}→{p['target']}/{p['protocol']}" for p in _port_list(svc))

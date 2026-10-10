@@ -123,3 +123,24 @@ def test_ensure_network_recreates_an_unused_unlabelled_one(monkeypatch):
         ["docker", "network", "rm"],
         ["docker", "network", "create"],
     ]
+
+
+def test_ensure_network_labels_a_renamed_network_with_its_key(monkeypatch):
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1 if cmd[2] == "inspect" else 0, stdout="")
+
+    monkeypatch.setattr(dc.subprocess, "run", run)
+    dc.ensure_network("plant-bus", "10.9.0.0/16", "bus")
+    assert "com.docker.compose.network=bus" in calls[-1]
+    assert calls[-1][-1] == "plant-bus"
+
+
+def test_ensure_network_leaves_an_external_one_as_it_is(monkeypatch):
+    # Another stack owns it; Compose doesn't check an external network's label
+    calls = []
+    monkeypatch.setattr(dc.subprocess, "run", _network_run(calls, inspect_out=" 0\n"))
+    dc.ensure_network("p4n4-net", owned=False)
+    assert calls == [["docker", "network", "inspect"]]

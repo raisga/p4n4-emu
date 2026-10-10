@@ -43,9 +43,13 @@ def cmd(
         bool,
         typer.Option("--volumes", "-v", help="Also remove persistent data volumes."),
     ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Don't ask before removing volumes (for scripts)."),
+    ] = False,
 ) -> None:
     """Stop p4n4 stack(s) and remove the resource-limit overlay."""
-    if volumes:
+    if volumes and not yes:
         confirmed = typer.confirm(
             "This will delete all persistent volumes (data loss). Continue?",
             default=False,

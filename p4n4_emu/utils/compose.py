@@ -27,7 +27,9 @@ _OVERRIDE_FILES = (
 )
 
 
-def ensure_network(name: str, subnet: str = NETWORK_SUBNET) -> None:
+def ensure_network(
+    name: str, subnet: str = NETWORK_SUBNET, label: str | None = None, *, owned: bool = True
+) -> None:
     """Ensure the shared network exists with the label Compose gives its own networks.
 
     p4n4-iot declares the network itself, and Compose 2.19.1 to 5.3.1 refuse a
@@ -36,7 +38,13 @@ def ensure_network(name: str, subnet: str = NETWORK_SUBNET) -> None:
     with the label and p4n4-iot's subnet. An unlabelled one is recreated only when
     no container uses it: recreating it under running stacks would cut them off
     (their service-name aliases, such as `influxdb`, would stop resolving).
+
+    *label* is the network's key in the compose file, which Compose expects in the
+    label; it defaults to *name*, as in p4n4-iot (`p4n4-net: {name: p4n4-net}`).
+    A stack that declares the network external doesn't own it (*owned* False): it
+    is only created when missing, since Compose doesn't check an external label.
     """
+    label = label or name
     inspect = subprocess.run(
         ["docker", "network", "inspect", name, "--format",
          f"{{{{index .Labels \"{_COMPOSE_NETWORK_LABEL}\"}}}} {{{{len .Containers}}}}"],
@@ -45,9 +53,9 @@ def ensure_network(name: str, subnet: str = NETWORK_SUBNET) -> None:
         check=False,
     )
     if inspect.returncode == 0:
-        label, _, attached = inspect.stdout.strip().rpartition(" ")
-        if label == name:
-            return  # Label already correct.
+        current, _, attached = inspect.stdout.strip().rpartition(" ")
+        if current == label or not owned:
+            return  # Label already correct, or not this stack's to check.
         if attached != "0":
             Console(stderr=True).print(
                 f"[yellow]Warning:[/yellow] {name} was created without Compose's label, and "
@@ -64,7 +72,7 @@ def ensure_network(name: str, subnet: str = NETWORK_SUBNET) -> None:
 
     subprocess.run(
         ["docker", "network", "create", "--driver", "bridge", "--subnet", subnet,
-         "--label", f"{_COMPOSE_NETWORK_LABEL}={name}", name],
+         "--label", f"{_COMPOSE_NETWORK_LABEL}={label}", name],
         capture_output=True,
         check=False,
     )
@@ -153,7 +161,7 @@ def _base(
 
 
 def up(cwd: Path, overlay: Path | None = None, build: bool = False, pull: bool = False) -> int:
-    ensure_network("p4n4-net")
+    """`up -d`; the shared networks must exist first (see `ensure_network`)."""
     args = ["up", "-d"]
     if build:
         args.append("--build")

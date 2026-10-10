@@ -79,6 +79,10 @@ def cmd(
         if errors:
             raise typer.Exit(1)
         return
+    if not errors:
+        # Registered already, or provided by Docker Desktop's VM
+        console.print(f"[green]QEMU emulation for {platform} is available.[/green]")
+        return
     _install_binfmt(platform)
 
 

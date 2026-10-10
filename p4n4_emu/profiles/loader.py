@@ -59,6 +59,23 @@ class Profile:
     def is_arm(self) -> bool:
         return self.arch in ("arm64", "aarch64", "armv7")
 
+    def as_dict(self) -> dict:
+        """The profile for --json output, with sizes in bytes as well as as written."""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "arch": self.arch,
+            "is_arm": self.is_arm,
+            "cpus": self.cpus,
+            "memory": self.memory,
+            "memory_bytes": self.memory_bytes,
+            "memory_swap": self.memory_swap,
+            "memory_swap_bytes": self.memory_swap_bytes,
+            "blkio_weight": self.blkio_weight,
+            "blkio_read_bps": self.blkio_read_bps,
+            "blkio_write_bps": self.blkio_write_bps,
+        }
+
 
 def load_profile(name: str) -> Profile:
     path = _DEFS_DIR / f"{name}.yml"

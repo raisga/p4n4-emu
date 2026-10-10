@@ -10,12 +10,14 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from p4n4_emu.utils.project import resolve_stack_dir
+from p4n4_emu.utils.stack_config import DEFAULT_BROKER_INFO, Broker, find_broker, load_config
+
 app = typer.Typer(help="Manage the sensor data simulator.", no_args_is_help=True)
 console = Console()
 
 _SIM_IMAGE = "p4n4-sensor-sim"
 _SIM_CONTAINER = "p4n4-sensor-sim"
-_SIM_NETWORK = "p4n4-net"
 _ROOT = Path(__file__).parent.parent.parent
 
 
@@ -23,7 +25,7 @@ def start_simulator(
     *,
     interval: float = 2.0,
     devices: int = 1,
-    mqtt_host: str = "p4n4-mqtt",
+    broker: Broker = DEFAULT_BROKER_INFO,
     rebuild: bool = False,
     broker_timeout: float = 60.0,
 ) -> int:
@@ -44,9 +46,9 @@ def start_simulator(
             console.print("[red]Failed to build sensor-sim image.[/red]")
             return rc
 
-    if not _wait_for_broker(mqtt_host, broker_timeout):
+    if not _wait_for_broker(broker.container, broker_timeout):
         console.print(
-            f"[yellow]Warning:[/yellow] broker container {mqtt_host!r} is not ready after "
+            f"[yellow]Warning:[/yellow] broker container {broker.container!r} is not ready after "
             f"{broker_timeout:.0f}s; the simulator will keep retrying until it is."
         )
 
@@ -56,10 +58,10 @@ def start_simulator(
         [
             "docker", "run", "-d",
             "--name", _SIM_CONTAINER,
-            "--network", _SIM_NETWORK,
+            "--network", broker.network,
             # Restart if the broker drops or was not up yet; a clean stop exits 0
             "--restart", "on-failure",
-            "-e", f"MQTT_HOST={mqtt_host}",
+            "-e", f"MQTT_HOST={broker.host}",
             "-e", f"SIM_INTERVAL_SEC={interval}",
             "-e", f"SIM_DEVICE_COUNT={devices}",
             _SIM_IMAGE,
@@ -70,7 +72,7 @@ def start_simulator(
     if rc == 0:
         console.print(
             f"[green]Sensor simulator started:[/green] "
-            f"{devices} device(s) → {mqtt_host} every {interval}s"
+            f"{devices} device(s) → {broker.host} every {interval}s"
         )
     else:
         console.print("[red]Failed to start sensor simulator.[/red]")
@@ -81,11 +83,24 @@ def start_simulator(
 def start_cmd(
     interval: float = typer.Option(2.0, "--interval", help="Publish interval in seconds."),
     devices: int = typer.Option(1, "--devices", help="Number of simulated sensor devices."),
-    mqtt_host: str = typer.Option("p4n4-mqtt", "--mqtt-host", help="Mosquitto hostname."),
+    mqtt_host: str | None = typer.Option(
+        None,
+        "--mqtt-host",
+        help="Broker hostname. Default: the broker in the current project's iot stack.",
+    ),
+    network: str | None = typer.Option(
+        None, "--network", help="Docker network to join. Default: the broker's network."
+    ),
     rebuild: bool = typer.Option(False, "--rebuild", help="Force rebuild of the image."),
 ) -> None:
     """Start the sensor simulator container."""
-    rc = start_simulator(interval=interval, devices=devices, mqtt_host=mqtt_host, rebuild=rebuild)
+    found = project_broker()
+    target = Broker(
+        host=mqtt_host or found.host,
+        container=mqtt_host or found.container,
+        network=network or found.network,
+    )
+    rc = start_simulator(interval=interval, devices=devices, broker=target, rebuild=rebuild)
     if rc != 0:
         raise typer.Exit(rc)
 
@@ -126,6 +141,12 @@ def status_cmd() -> None:
         f"[green]{state}[/green]" if state == "running" else f"[yellow]{state}[/yellow]",
     )
     console.print(table)
+
+
+def project_broker(stack_dir: Path | None = None) -> Broker:
+    """The broker of the current project's iot stack, or p4n4's defaults."""
+    cwd = resolve_stack_dir(stack_dir, "iot")
+    return find_broker(load_config(cwd)) if cwd is not None else DEFAULT_BROKER_INFO
 
 
 def _image_exists() -> bool:

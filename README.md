@@ -142,19 +142,25 @@ limits are set but not enforced.
 
 ## Command reference
 
+From a p4n4 project, `p4n4 up --emu rpi5` runs `p4n4-emu up --profile rpi5` for the
+project's stacks, and `p4n4 down` hands the stacks p4n4-emu started back to
+`p4n4-emu down`, so their overlays and the simulator go too. `p4n4-emu` must be on `PATH`.
+
 ```
 p4n4-emu setup [--arch arm64|armv7] [--check-only]
 p4n4-emu up    [--profile rpi5] [--stack iot|ai|edge|dashboard|iot,ai|all]
                [--stack-dir PATH] [--arch arm64|armv7|x86_64 | --native]
-               [--sim] [--sim-interval 2.0] [--sim-devices 1] [--dry-run]
+               [--sim] [--sim-interval 2.0] [--sim-devices 1] [--build] [--pull]
+               [--dry-run]
 p4n4-emu down  [--stack iot|ai|edge|dashboard|iot,ai|all]
-               [--stack-dir PATH] [--volumes]
-p4n4-emu status [--profile rpi5] [--stack iot|ai|edge|dashboard|iot,ai|all]
+               [--stack-dir PATH] [--volumes] [--yes]
+p4n4-emu status [--profile rpi5] [--stack iot|ai|edge|dashboard|iot,ai|all] [--json]
 p4n4-emu logs  [SERVICE] [--stack iot|ai|edge|dashboard|iot,ai|all]
                [--stack-dir PATH] [--tail 100] [--no-follow]
-p4n4-emu profile list
-p4n4-emu profile show <name>
-p4n4-emu sim start [--interval 2.0] [--devices 1] [--mqtt-host p4n4-mqtt]
+p4n4-emu profile list [--json]
+p4n4-emu profile show <name> [--json]
+p4n4-emu profile switch <name> [--stack ...] [--dry-run]
+p4n4-emu sim start [--interval 2.0] [--devices 1] [--mqtt-host HOST] [--network NAME]
 p4n4-emu sim stop
 p4n4-emu sim status
 ```
@@ -164,6 +170,11 @@ p4n4 project (`.p4n4.json` is found by walking up from the current directory), f
 back to `iot`. Stack directories resolve in this order: `--stack-dir` (its `<stack>/`
 subdirectory first), then the p4n4 project layout (flat root or `<project>/<stack>/`),
 then a `<stack>/` or compose file next to the current directory.
+
+The shared network (`p4n4-net`) and the broker (`p4n4-mqtt`) are read from the stack's
+compose config, so a project that renames them still works: `up` creates the networks the
+stack names before Compose starts it, and the simulator joins the iot broker's network.
+`sim start --mqtt-host` / `--network` override them.
 
 `--arch` overrides the profile's architecture; without it, ARM profiles emulate arm64
 and x86 profiles run natively. `--native` never forces a platform.

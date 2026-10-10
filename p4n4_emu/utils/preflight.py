@@ -6,7 +6,7 @@ import platform as _platform
 import subprocess
 from pathlib import Path
 
-from p4n4_emu.utils.usage import cgroup_v2
+from p4n4_emu.utils.docker_host import cgroup_v2, docker_host
 
 _BINFMT_DIR = Path("/proc/sys/fs/binfmt_misc")
 
@@ -61,13 +61,11 @@ def run_preflight(require_qemu: bool = False, platform: str = "linux/arm64") -> 
     errors: list[str] = []
 
     # Docker Engine >= 24
-    rc, out = _run(["docker", "info", "--format", "{{.ServerVersion}}"])
-    if rc != 0:
+    host = docker_host()
+    if host is None:
         errors.append("Docker is not running or not installed.")
-    else:
-        ver = _version_tuple(out)
-        if ver < (24,):
-            errors.append(f"Docker Engine >= 24 required; found {out!r}.")
+    elif _version_tuple(host.version) < (24,):
+        errors.append(f"Docker Engine >= 24 required; found {host.version!r}.")
 
     # Docker Compose >= 2.17
     rc, out = _run(["docker", "compose", "version", "--short"])
@@ -78,15 +76,22 @@ def run_preflight(require_qemu: bool = False, platform: str = "linux/arm64") -> 
         if ver < (2, 17):
             errors.append(f"Docker Compose >= 2.17 required; found {out!r}.")
 
-    # cgroup v2 — warn only (non-fatal)
-    if not cgroup_v2():
+    # cgroup v2 — warn only (non-fatal). Ask the engine: on Docker Desktop it runs
+    # in a VM, and this host's /sys/fs/cgroup says nothing about it
+    if host is not None and host.cgroup_driver == "none":
+        errors.append(
+            "WARNING: Docker reports no cgroup driver (rootless Docker without cgroup "
+            "delegation?), so CPU/memory limits are not applied."
+        )
+    elif not cgroup_v2(host):
         errors.append(
             "WARNING: cgroup v2 not detected. CPU/memory limits may not be enforced. "
             "Check your kernel boot parameters (systemd.unified_cgroup_hierarchy=1)."
         )
 
-    # QEMU binfmt for the emulated architecture
-    if require_qemu:
+    # QEMU binfmt for the emulated architecture. Docker Desktop's VM registers
+    # its own handlers, which this host's binfmt_misc doesn't show
+    if require_qemu and not (host is not None and host.desktop):
         binfmt, install_name = qemu_handler(platform)
         if not binfmt.exists():
             errors.append(
