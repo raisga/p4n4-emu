@@ -90,9 +90,8 @@ class DeviceSim:
         self.device = device
         self.scenario = scenario
         self.interval = scenario.interval_of(device)
-        # The same id always gets the same phase, so a restarted simulator keeps
-        # each device on its own curve, and devices don't all report the same value
-        phase = random.Random(device.id).random()
+        # Devices don't all report the same value: each has its own phase
+        phase = generators.device_phase(device.id)
         self.gens: dict[str, Iterator] = {}
         for name, wave in device.measurements.items():
             if wave is None:

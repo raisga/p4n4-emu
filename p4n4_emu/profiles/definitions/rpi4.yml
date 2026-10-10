@@ -1,6 +1,7 @@
 name: rpi4
 description: "Raspberry Pi 4 — 4 GB"
 arch: arm64
+board: rpi4
 cpus: 4
 memory: "3584m"
 memory_swap: "3584m"

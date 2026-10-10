@@ -195,6 +195,8 @@ p4n4-emu sim start [--interval 2.0] [--devices 1 | --scenario FILE]
 p4n4-emu sim check FILE
 p4n4-emu sim stop
 p4n4-emu sim status
+p4n4-emu run   [--profile rpi5] [--device ID] [--scenario FILE] [--gpio-mqtt HOST[:PORT]]
+               [--gpio-prefix emu/gpio] [--no-parts] [--python PATH] SCRIPT [ARGS...]
 ```
 
 Without `--stack`, `up`/`down`/`status`/`logs` target the enabled stacks of the surrounding
@@ -211,34 +213,69 @@ stack names before Compose starts it, and the simulator joins the iot broker's n
 `--arch` overrides the profile's architecture; without it, ARM profiles emulate arm64
 and x86 profiles run natively. `--native` never forces a platform.
 
-## GPIO stub
+## Hardware stubs
 
-The `p4n4_emu.hw.gpio_stub` module is a drop-in replacement for `RPi.GPIO`, enabling scripts like `p4n4_boot_sim.py` to run on any workstation:
+`p4n4-emu run` runs a Python script against an emulated Raspberry Pi: the hardware
+libraries it imports are replaced by stubs, so scripts like `p4n4_button_handler.py` run
+unmodified on any workstation:
 
-```python
-import sys
-import p4n4_emu.hw.gpio_stub as GPIO
-sys.modules["RPi"] = type(sys)("RPi")
-sys.modules["RPi.GPIO"] = GPIO
-
-# Now import your RPi script normally
+```bash
+p4n4-emu run p4n4_button_handler.py                  # Pi 5 by default
+p4n4-emu run -p rpi4 --gpio-mqtt localhost read_sensors.py --verbose
+p4n4-emu run --python .venv/bin/python -- -m my_app  # the script's own virtualenv
 ```
 
-It covers the `RPi.GPIO` calls the p4n4 scripts make: `setmode`, `setup` (with
-`pull_up_down=` and `initial=`, one channel or a list), `output`, `input`, the edge
-functions (`add_event_detect`, `add_event_callback`, `remove_event_detect`,
-`event_detected`, with `bouncetime`) and `cleanup`. `PWM` and `wait_for_edge` aren't
-stubbed yet.
+| Library | What the stub covers |
+|---------|----------------------|
+| `RPi.GPIO` | As rpi-lgpio (the Pi 5's RPi.GPIO) behaves: `setmode` (BCM / BOARD), `setup`, `input` / `output`, edge detection with `bouncetime`, `wait_for_edge`, `PWM`, `RPI_INFO`, `cleanup`, with the same errors for a missing `setmode()` or `setup()` |
+| `lgpio` | Chips, claims, groups, alerts and callbacks (debounce included), `tx_pwm` / `tx_servo`, and the `i2c_*` / `spi_*` calls |
+| `gpiozero` | The real library, unmodified: on the emulated board it picks its lgpio pin factory, which runs on the `lgpio` stub |
+| `gpiod` | The libgpiod v2 API: chips, line info, `request_lines`, active-low, bias, edge events (the request's fd works with `select`) |
+| `smbus2`, `smbus` | Every SMBus call and `i2c_rdwr`, on the emulated I2C buses |
+| `spidev` | `SpiDev` transfers on `/dev/spidev0.0` and `0.1` |
+| `serial` (pyserial) | `Serial` on `/dev/serial0` and `/dev/ttyAMA0` |
 
-Nothing outside the script drives an input pin, so press a button with `set_input`, a
-stub-only call. A level change is an edge and fires the pin's callbacks:
+All of them share one set of pins and buses: a pin set by `RPi.GPIO` reads the same through
+`gpiod`. Like on a Pi, I2C bus 1 exists and a missing address raises `OSError` 121
+(Remote I/O error), SPI reads zeros with nothing attached, and a serial read waits for its
+timeout. The profile's board (`rpi4`, `rpi5`) gives the revision in
+`/proc/device-tree` (what `RPI_INFO` and gpiozero read), the gpiochips (the Pi 5 has
+`gpiochip0`, and `gpiochip4` linked to it) and the `/dev` nodes; `run` serves those files
+inside the script's process only.
 
-```python
-GPIO.set_input(27, GPIO.LOW)    # press the button on GPIO 27 (pulled up)
-GPIO.set_input(27, GPIO.HIGH)   # release it
+**Sensors.** The I2C bus has a BME280 (0x76), an MPU-6050 (0x68) and an ADS1115 (0x48), SPI
+0.0 an MCP3008, and 1-Wire a DS18B20 (`/sys/bus/w1/devices/28-*/w1_slave`). They're
+register-level models: a driver reads the chip id, the calibration data and the raw ADC
+counts, and gets the values back through the part's own formulas. Their readings follow the
+sensor simulator's curves for one device (`--device`, default `emu-sensor-0`; `--scenario`
+for a scenario's waves), so a script on the bus reads what the simulator publishes on
+`sensors/<device>/…`. The ADS1115 and MCP3008 inputs are the device's `a0`–`a3` and
+`ch0`–`ch7` measurements when the scenario defines them. `--no-parts` leaves the buses empty.
+
+**Driving pins.** Nothing outside the script drives an input, so press a button over MQTT
+with `--gpio-mqtt HOST[:PORT]`:
+
+```bash
+mosquitto_pub -t emu/gpio/27/set -m 0         # press the button on GPIO 27 (pulled up)
+mosquitto_pub -t emu/gpio/27/set -m 1         # release it ("release" stops driving it)
+mosquitto_sub -t 'emu/gpio/+/state' -v        # outputs and inputs, on every change
 ```
 
-Set `logging.basicConfig(level=logging.DEBUG)` to see pin state transitions in your terminal.
+Pins are BCM numbers in topics; `emu/gpio/<pin>/pwm` carries a PWM output's frequency and
+duty cycle. In tests, drive pins directly:
+
+```python
+from p4n4_emu.hw import buses, pins, shims
+shims.install(board="rpi5")       # what `run` does: stubs, parts, board files
+import RPi.GPIO as GPIO           # the stub
+pins.drive(27, 0)                 # press; RPi.GPIO's GPIO.set_input(27, GPIO.LOW) does the same
+buses.uart("/dev/serial0").feed(b"$GPGGA,...\r\n")   # bytes arriving on the serial port
+```
+
+`buses.attach_i2c(bus, address, part)` (and `attach_spi`, `attach_uart`) add parts of your
+own; `p4n4_emu.hw.devices` has the models. Not stubbed: the `gpiod` v1 API, `lgpio`'s
+serial and notification calls, and PWM waveforms (a PWM output records its frequency and
+duty cycle; the pin's level doesn't toggle).
 
 ## Sensor simulator
 
@@ -347,7 +384,8 @@ dashboard that stalls on disk), not to predict latency or throughput on the real
 | Disk bandwidth | `blkio_config` → `io.max` read/write bytes per second, on the whole disk that holds Docker's data root | Yes for direct and buffered I/O on cgroup v2; direct I/O only on v1 | Bandwidth only: no IOPS or latency limit, so small random writes are far faster than on an SD card (TODO). Reads served from page cache aren't throttled. Volumes or bind mounts on another disk aren't limited. Skipped when no block device is found (tmpfs, NFS, some btrfs / LVM setups, Docker Desktop). `profile switch` can't change it on running containers. |
 | Disk priority | `blkio_config.weight` → `io.bfq.weight` | Only with the BFQ I/O scheduler | Has no effect on hosts using `mq-deadline` or `none`, the usual default for NVMe. |
 | Architecture | `platform: linux/arm64` with QEMU user-mode emulation | Yes: the arm64 images and binaries run | Speed: QEMU is roughly 3–10x slower, so timings mean nothing and LLM inference (Ollama) is impractical. Kernel features come from the host kernel, not the board's. |
-| Storage size, network, GPIO and other peripherals, accelerators, temperature | — | No | No capacity limit, no network shaping (TODO: `tc netem`), no thermal throttling. GPIO is a stub (`p4n4_emu.hw.gpio_stub`); sensors come from the simulator. |
+| GPIO, I2C, SPI, UART, 1-Wire | `p4n4-emu run`: stubs for the libraries a script imports, and register-level sensor models | In the script's process | Logic levels and register contents, not electrical behaviour or timing: transfers are instant, PWM is recorded but doesn't toggle the pin, and a sensor reads the simulator's curve. Containers don't see these devices. |
+| Storage size, network, accelerators, temperature | — | No | No capacity limit, no network shaping (TODO: `tc netem`), no thermal throttling. |
 
 On Docker Desktop the limits apply inside its Linux VM, and the VM's own CPU and memory
 settings cap everything on top of them.

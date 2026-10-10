@@ -35,6 +35,7 @@ class Profile:
     blkio_read_bps: int
     blkio_write_bps: int
     arch: str = "x86_64"
+    board: str | None = None  # the emulated board (hw.board), None without a GPIO header
     _memory_bytes: int = field(default=0, init=False, repr=False)
     _memory_swap_bytes: int = field(default=0, init=False, repr=False)
 
@@ -66,6 +67,7 @@ class Profile:
             "description": self.description,
             "arch": self.arch,
             "is_arm": self.is_arm,
+            "board": self.board,
             "cpus": self.cpus,
             "memory": self.memory,
             "memory_bytes": self.memory_bytes,
@@ -93,6 +95,7 @@ def load_profile(name: str) -> Profile:
         blkio_read_bps=int(data["blkio_read_bps"]),
         blkio_write_bps=int(data["blkio_write_bps"]),
         arch=str(data.get("arch", "x86_64")),
+        board=data.get("board"),
     )
 
 

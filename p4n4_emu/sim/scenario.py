@@ -32,8 +32,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 # A sinusoid with Gaussian noise, clamped to [min, max]: see generators.wave()
 WAVE_KEYS = ("base", "amplitude", "noise", "period", "min", "max", "unit")
 
@@ -128,6 +126,10 @@ class ScenarioError(ValueError):
 
 
 def load_scenario(path: Path | str) -> Scenario:
+    # Imported here: the hardware stubs use this module's waves, and they run in
+    # the script's interpreter (`p4n4-emu run --python`), which may not have PyYAML
+    import yaml
+
     path = Path(path)
     try:
         doc = yaml.safe_load(path.read_text())

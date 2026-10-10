@@ -32,7 +32,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.4"]
+# gpiozero: tests run it on the lgpio stub
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.4", "gpiozero>=2"]
 
 [project.scripts]
 p4n4-emu = "p4n4_emu.cli:app"
@@ -61,6 +62,7 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "gpiozero>=2.0",
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
     "ruff>=0.15.11",

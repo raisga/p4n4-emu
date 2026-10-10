@@ -28,12 +28,13 @@ jobs:
           fi
       - run: pip install build
       - run: python -m build
-      # The wheel must carry what isn't Python: profiles, overlay templates, the sim image
+      # The wheel must carry what isn't a package module: profiles, overlay templates,
+      # the sim image, and the sitecustomize `run` puts on the script's PYTHONPATH
       - name: Check the wheel's data files
         run: |
           unzip -l dist/*.whl > files.txt
           for f in profiles/definitions/rpi5.yml overlays/templates/stack.emu.yml.j2 \
-                   sim/Dockerfile sim/requirements.txt; do
+                   sim/Dockerfile sim/requirements.txt hw/site/sitecustomize.py; do
             grep -q "p4n4_emu/$f" files.txt || { echo "::error::wheel lacks p4n4_emu/$f"; exit 1; }
           done
       - uses: actions/upload-artifact@v4

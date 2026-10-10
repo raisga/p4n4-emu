@@ -231,7 +231,7 @@ sensors/emu-sensor-0/raw         {"values": [0.01, -0.02, 1.00], "cpu_pct": 42.3
 
 ## 6. Simulate LED Toggle from a Sensor Threshold
 
-This script subscribes to the `sensors/emu-sensor-0/temperature` MQTT topic and uses the GPIO stub to toggle a virtual LED (pin 17) whenever the temperature crosses a threshold.
+This script subscribes to the `sensors/emu-sensor-0/temperature` MQTT topic and toggles an LED on GPIO 17 whenever the temperature crosses a threshold. It's written for a real Pi (`import RPi.GPIO`); `p4n4-emu run` swaps in the emulated board's GPIO.
 
 Create the file `led_threshold.py` anywhere on your workstation:
 
@@ -244,16 +244,9 @@ Toggles a simulated GPIO LED (pin 17) based on a temperature threshold.
 """
 
 import json
-import sys
-import types
 
 import paho.mqtt.client as mqtt
-
-# ── Inject the GPIO stub before any RPi imports ──────────────────────────────
-rpi_mod = types.ModuleType("RPi")
-sys.modules["RPi"] = rpi_mod
-from p4n4_emu.hw import gpio_stub as GPIO  # noqa: E402
-sys.modules["RPi.GPIO"] = GPIO
+import RPi.GPIO as GPIO
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 MQTT_HOST      = "localhost"
@@ -310,8 +303,11 @@ client.loop_forever()
 Run the script (the emulator stack must already be up):
 
 ```bash
-uv run python led_threshold.py
+p4n4-emu run --gpio-mqtt localhost led_threshold.py
 ```
+
+`--gpio-mqtt` publishes the LED's level on `emu/gpio/17/state`, so you can watch it from
+another terminal (`mosquitto_sub -t 'emu/gpio/+/state' -v`), or from Node-RED.
 
 ---
 
@@ -415,6 +411,9 @@ p4n4-emu sim check FILE   # validate a scenario (devices, measurements, faults)
 p4n4-emu sim stop
 p4n4-emu sim status
 
+# Run a Pi script against the emulated board (RPi.GPIO, lgpio, gpiod, gpiozero, smbus2, spidev, pyserial)
+p4n4-emu run [--profile rpi5] [--gpio-mqtt HOST[:PORT]] [--device ID] [--scenario FILE] SCRIPT [ARGS...]
+
 # LED threshold demo
-uv run python led_threshold.py
+p4n4-emu run --gpio-mqtt localhost led_threshold.py
 ```

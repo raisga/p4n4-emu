@@ -134,26 +134,50 @@ Line numbers below refer to the code before the fix.
 - [ ] User-defined profiles in `~/.p4n4-emu/profiles/*.yml` and inside the project, with a
       schema check (unknown keys, invalid sizes) and a `profile validate` command.
 
-## 4. Hardware stubs (P1)
+## 4. Hardware stubs (P1) — done 2026-10-10, two follow-ups open
 
 - [x] **`gpio_stub.setup` breaks real scripts.** It now takes the full `RPi.GPIO` signature
       (`pull_up_down=`, `initial=`, pin lists). `p4n4_button_handler.py` runs under the stub.
 - [x] Edge detection: `add_event_detect` (with `bouncetime`), `add_event_callback`,
       `remove_event_detect`, `event_detected`, plus `getmode` and `gpio_function`. Inputs are
       driven with the stub-only `set_input(pin, level)`.
-- [ ] Add the rest of the `RPi.GPIO` API: `PWM`, `wait_for_edge`, `BOARD` ↔ `BCM` mapping,
-      `RPI_INFO`.
-- [ ] **Pi 5 does not support `RPi.GPIO`.** Add stubs for `gpiozero` (mock pin factory) and
-      `lgpio` / `gpiod`, which is what the `rpi5` profile would actually run.
-- [ ] Add an external control channel so tests or a UI can drive input pins: MQTT topic
-      `emu/gpio/<pin>/set`, with state published on `emu/gpio/<pin>/state`.
-- [ ] Make `SimI2C` / `SimSPI` / `SimUART` look like the real libraries (`smbus2.SMBus`, `spidev.SpiDev`,
-      `serial.Serial`) and register them as import shims.
-- [ ] Replace random bytes with **register-level device models** for common parts
-      (BME280, MPU-6050, ADS1115, DS18B20 over 1-Wire), fed by the same waveform generators as
-      the MQTT simulator so both paths agree.
-- [ ] Add a `p4n4-emu run <script.py>` command that injects every shim (via `sitecustomize`)
-      so users stop hand-patching `sys.modules` as the README and guide show.
+- [x] The rest of the `RPi.GPIO` API: `PWM`, `wait_for_edge`, `BOARD` ↔ `BCM` mapping,
+      `RPI_INFO` / `RPI_REVISION` for the profile's board. The stub now follows rpi-lgpio
+      (what a Pi 5 runs) strictly: no pin calls before `setmode()`, `input()` / `output()`
+      need `setup()`, invalid channels raise, as on the board.
+- [x] **Pi 5 does not support `RPi.GPIO`.** Stubs for `lgpio` (chips, claims, groups,
+      alerts with debounce, `tx_pwm` / `tx_servo`, `i2c_*` / `spi_*`) and `gpiod` (libgpiod
+      v2: requests, active-low, bias, edge events on a selectable fd). Real `gpiozero` runs
+      unmodified on the `lgpio` stub (its own pin factory picks it on the emulated board; a
+      dev dependency, so the tests check it). Every library shares one set of pins
+      (`hw/pins.py`). Profiles name their board (`board: rpi4 | rpi5`).
+- [x] External control channel: `p4n4-emu run --gpio-mqtt HOST[:PORT]` drives inputs from
+      `emu/gpio/<pin>/set` (1 / 0, high / low, `release`) and publishes `emu/gpio/<pin>/state`
+      (retained, on every change) and `emu/gpio/<pin>/pwm`. Checked with the unmodified
+      `p4n4_button_handler.py`: a press over MQTT ran its health report.
+- [x] `smbus2` / `smbus`, `spidev` and `pyserial` stubs on emulated buses (`hw/buses.py`),
+      registered as import shims. A missing I2C address raises `OSError` 121, missing
+      buses / ports fail to open, SPI reads zeros with nothing attached, a serial read waits
+      for its timeout. `peripherals.py` (`SimI2C` / `SimSPI` / `SimUART`, random bytes) is gone.
+- [x] Register-level models (`hw/devices/`): BME280 (calibration data, sleep / forced /
+      normal mode, raw ADC counts that Bosch's formulas turn back into the value, checked
+      with the datasheet's float formulas), MPU-6050 (asleep at power-up, full-scale
+      ranges), ADS1115 (pointer, MUX / PGA, single-shot and continuous), MCP3008 (bit-level
+      SPI framing), DS18B20 over 1-Wire (`/sys/bus/w1/devices/28-*/w1_slave` with a valid
+      CRC). They follow the simulator's waves for one device (`--device`, `--scenario`),
+      with the same per-device phase, so the hardware and MQTT paths agree.
+- [x] `p4n4-emu run <script.py> [args]`: puts a `sitecustomize` first on `PYTHONPATH` that
+      installs every shim, the default parts and the board's files (`/proc/device-tree`,
+      1-Wire sysfs, `/dev` nodes, served by `hw/vfs.py` inside the script's process only),
+      then execs the interpreter (`--python` for the script's own virtualenv; the stubs
+      need only the standard library). Any `sitecustomize` it shadows still runs.
+- [ ] Parts from a file: a `--hardware FILE` listing which parts sit on which bus /
+      address and which measurements feed them. Today the default board is fixed, and
+      other layouts need `buses.attach_*()` from Python.
+- [ ] Not stubbed yet: the `gpiod` v1 API (`chip.get_line()`, older Pi OS), `lgpio`'s
+      serial and notification calls, PWM as a toggling level (it records frequency and
+      duty cycle), `lgpio` watchdog alerts, and the faults of the simulator scenario
+      (spikes, stuck values) on the hardware path.
 
 ## 5. Sensor simulator (P1)
 

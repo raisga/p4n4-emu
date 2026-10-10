@@ -10,6 +10,16 @@ from collections.abc import Iterator
 from p4n4_emu.sim.scenario import Wave
 
 
+def device_phase(device_id: str) -> float:
+    """The fraction of a period a device's curves are shifted by (0.0–1.0).
+
+    The same id always gets the same phase, so a restarted simulator keeps each
+    device on its own curve, and the emulated parts of `p4n4-emu run` follow
+    the curve the simulator publishes for that device.
+    """
+    return random.Random(device_id).random()
+
+
 def _wave(
     base: float, amplitude: float, noise: float, period: float = 300.0, phase: float = 0.0
 ) -> Iterator[float]:

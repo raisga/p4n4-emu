@@ -1,12 +1,20 @@
 """Tests for the RPi.GPIO drop-in stub."""
 
+import threading
+
 import pytest
 
 import p4n4_emu.hw.gpio_stub as GPIO
+from p4n4_emu.hw import board, pins, shims
 
 
 def setup_function():
-    GPIO.cleanup()
+    shims.reset()
+    GPIO.setmode(GPIO.BCM)
+
+
+def teardown_function():
+    shims.reset()
 
 
 def test_constants():
@@ -18,9 +26,23 @@ def test_constants():
     assert GPIO.LOW == 0
 
 
-def test_setmode_does_not_raise():
+def test_setmode_again_with_the_same_mode():
     GPIO.setmode(GPIO.BCM)
+    assert GPIO.getmode() == GPIO.BCM
+
+
+def test_setmode_to_another_mode_raises_until_cleanup():
+    with pytest.raises(ValueError, match="different mode"):
+        GPIO.setmode(GPIO.BOARD)
+    GPIO.cleanup()
     GPIO.setmode(GPIO.BOARD)
+    assert GPIO.getmode() == GPIO.BOARD
+
+
+def test_pins_need_a_numbering_mode():
+    GPIO.cleanup()
+    with pytest.raises(RuntimeError, match="setmode"):
+        GPIO.setup(17, GPIO.OUT)
 
 
 def test_setwarnings_does_not_raise():
@@ -54,7 +76,11 @@ def test_cleanup_resets_state():
     GPIO.setup(17, GPIO.OUT)
     GPIO.output(17, GPIO.HIGH)
     GPIO.cleanup()
-    assert GPIO.input(17) == GPIO.LOW
+    assert GPIO.getmode() is None
+    assert pins.get(17) == pins.Pin()
+    GPIO.setmode(GPIO.BCM)
+    with pytest.raises(RuntimeError, match="setup"):
+        GPIO.input(17)
 
 
 def test_toggle_pattern():
@@ -115,11 +141,143 @@ def test_output_to_input_pin_raises():
 
 
 def test_getmode_and_gpio_function():
-    assert GPIO.getmode() is None
-    GPIO.setmode(GPIO.BCM)
     GPIO.setup(17, GPIO.OUT)
     assert GPIO.getmode() == GPIO.BCM
     assert GPIO.gpio_function(17) == GPIO.OUT
+    assert GPIO.gpio_function(4) == GPIO.IN
+
+
+def test_setup_argument_checks():
+    with pytest.raises(ValueError, match="pull_up_down"):
+        GPIO.setup(17, GPIO.OUT, pull_up_down=GPIO.PUD_UP)
+    with pytest.raises(ValueError, match="initial"):
+        GPIO.setup(27, GPIO.IN, initial=GPIO.HIGH)
+    with pytest.raises(ValueError, match="invalid on a Raspberry Pi"):
+        GPIO.setup(99, GPIO.OUT)
+
+
+def test_input_and_output_need_setup():
+    with pytest.raises(RuntimeError, match="setup"):
+        GPIO.input(17)
+    with pytest.raises(RuntimeError, match="OUTPUT"):
+        GPIO.output(17, GPIO.HIGH)
+
+
+# ── BOARD numbering ───────────────────────────────────────────────────────────
+
+def test_board_numbering_maps_header_pins_to_bcm():
+    GPIO.cleanup()
+    GPIO.setmode(GPIO.BOARD)
+    GPIO.setup(11, GPIO.OUT, initial=GPIO.HIGH)  # header pin 11 is GPIO 17
+    assert pins.read(17) == 1
+
+
+def test_board_numbering_rejects_power_and_ground_pins():
+    GPIO.cleanup()
+    GPIO.setmode(GPIO.BOARD)
+    with pytest.raises(ValueError, match="invalid on a Raspberry Pi"):
+        GPIO.setup(1, GPIO.OUT)  # 3V3
+
+
+def test_callbacks_get_the_channel_in_board_numbering():
+    GPIO.cleanup()
+    GPIO.setmode(GPIO.BOARD)
+    calls = []
+    GPIO.setup(13, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # GPIO 27
+    GPIO.add_event_detect(13, GPIO.FALLING, callback=calls.append)
+    GPIO.set_input(13, GPIO.LOW)
+    assert calls == [13]
+
+
+# ── RPI_INFO ──────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    ("name", "kind", "revision", "processor", "ram"),
+    [("rpi4", "Pi 4 Model B", "c03114", "BCM2711", "4G"),
+     ("rpi5", "Pi 5 Model B", "d04170", "BCM2712", "8G")],
+)
+def test_rpi_info_follows_the_board(name, kind, revision, processor, ram):
+    board.use(name)
+    info = GPIO.RPI_INFO
+    assert (info["TYPE"], info["REVISION"], info["PROCESSOR"], info["RAM"]) == (
+        kind, revision, processor, ram,
+    )
+    assert GPIO.RPI_REVISION == 3
+
+
+# ── PWM ───────────────────────────────────────────────────────────────────────
+
+def test_pwm_records_frequency_and_duty_cycle():
+    GPIO.setup(18, GPIO.OUT)
+    pwm = GPIO.PWM(18, 100)
+    assert pins.get(18).pwm is None  # created, not started
+    pwm.start(25)
+    assert pins.get(18).pwm == (100.0, 25.0)
+    pwm.ChangeDutyCycle(75)
+    pwm.ChangeFrequency(50)
+    assert pins.get(18).pwm == (50.0, 75.0)
+    pwm.stop()
+    assert pins.get(18).pwm is None
+    assert pins.read(18) == GPIO.LOW
+
+
+def test_pwm_checks():
+    with pytest.raises(RuntimeError, match="output"):
+        GPIO.PWM(18, 100)
+    GPIO.setup(18, GPIO.OUT)
+    with pytest.raises(ValueError, match="frequency"):
+        GPIO.PWM(18, 0)
+    pwm = GPIO.PWM(18, 100)
+    with pytest.raises(RuntimeError, match="already exists"):
+        GPIO.PWM(18, 100)
+    with pytest.raises(ValueError, match="dutycycle"):
+        pwm.start(101)
+
+
+def test_cleanup_stops_pwm():
+    GPIO.setup(18, GPIO.OUT)
+    pwm = GPIO.PWM(18, 100)
+    pwm.start(50)
+    GPIO.cleanup(18)
+    assert pins.get(18).pwm is None
+    assert pwm  # still referenced: cleanup stopped it, not garbage collection
+
+
+# ── wait_for_edge ─────────────────────────────────────────────────────────────
+
+def test_wait_for_edge_times_out():
+    GPIO.setup(27, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    assert GPIO.wait_for_edge(27, GPIO.FALLING, timeout=20) is None
+
+
+def test_wait_for_edge_returns_the_channel():
+    GPIO.setup(27, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    press = threading.Timer(0.05, GPIO.set_input, (27, GPIO.LOW))
+    press.start()
+    assert GPIO.wait_for_edge(27, GPIO.FALLING, timeout=2000) == 27
+    press.join()
+    # The temporary edge detection is gone again
+    GPIO.add_event_detect(27, GPIO.RISING)
+
+
+def test_wait_for_edge_conflicts_with_a_callback():
+    calls = _button()
+    with pytest.raises(RuntimeError, match="Conflicting"):
+        GPIO.wait_for_edge(27, GPIO.FALLING, timeout=10)
+    assert calls == []
+
+
+def test_a_failing_callback_does_not_stop_the_next(capsys):
+    calls = _button()
+
+    def broken(channel):
+        raise ValueError("boom")
+
+    GPIO.add_event_callback(27, broken)
+    GPIO.add_event_callback(27, calls.append)
+    GPIO.set_input(27, GPIO.LOW)
+    assert calls == [27, 27]
+    assert "boom" in capsys.readouterr().err
 
 
 # ── edge detection ────────────────────────────────────────────────────────────
