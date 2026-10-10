@@ -49,19 +49,31 @@ def test_old_engine(monkeypatch):
 
 
 def test_docker_host_parses_info(monkeypatch):
-    out = "29.4.1|2|systemd|Docker Desktop\n"
+    out = "29.4.1|2|systemd|Docker Desktop|runc,io.containerd.runc.v2,\n"
     monkeypatch.setattr(
         docker_host.subprocess, "run",
         lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=out),
     )
     host = docker_host.docker_host()
-    assert host == DockerHost("29.4.1", "2", "systemd", "Docker Desktop")
+    assert host == DockerHost(
+        "29.4.1", "2", "systemd", "Docker Desktop", ("io.containerd.runc.v2", "runc")
+    )
     assert host.desktop
+    assert not host.nvidia
+
+
+def test_docker_host_sees_the_nvidia_runtime(monkeypatch):
+    out = "29.4.1|2|systemd|Ubuntu 24.04|nvidia,runc,\n"
+    monkeypatch.setattr(
+        docker_host.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=out),
+    )
+    assert docker_host.docker_host().nvidia
 
 
 def test_docker_host_none_when_daemon_down(monkeypatch):
     monkeypatch.setattr(
         docker_host.subprocess, "run",
-        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="|||\n"),
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="||||\n"),
     )
     assert docker_host.docker_host() is None

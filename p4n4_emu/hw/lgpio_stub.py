@@ -2,8 +2,8 @@
 
 `p4n4-emu run` makes `import lgpio` load it, which also brings up gpiozero:
 its default pin factory on a Pi 5 is lgpio. Covers the gpiochip / GPIO / group /
-PWM / alert calls, and the I2C and SPI calls on the emulated buses; the serial
-and notification-pipe calls are not stubbed.
+PWM / alert calls (with debounce and watchdog alerts), notification pipes, and
+the I2C, SPI and serial calls on the emulated buses.
 
 Errors behave as in lgpio: a negative status, raised as lgpio.error with its
 text while `exceptions` is True (the default).
@@ -11,6 +11,8 @@ text while `exceptions` is True (the default).
 
 from __future__ import annotations
 
+import os
+import struct
 import sys
 import threading
 import time
@@ -45,16 +47,22 @@ SPI_MODE_0, SPI_MODE_1, SPI_MODE_2, SPI_MODE_3 = 0, 1, 2, 3
 
 # Error codes (the ones the stub returns)
 OKAY = 0
+BAD_PATHNAME = -3
 BAD_HANDLE = -5
 I2C_OPEN_FAILED = -26
+SERIAL_OPEN_FAILED = -27
 SPI_OPEN_FAILED = -28
 BAD_I2C_BUS = -29
 BAD_I2C_ADDR = -30
 BAD_SPI_CHANNEL = -31
+BAD_SERIAL_FLAGS = -34
+BAD_SERIAL_SPEED = -37
 BAD_I2C_PARAM = -39
+BAD_SERIAL_PARAM = -40
 I2C_WRITE_FAILED = -41
 I2C_READ_FAILED = -42
 BAD_SPI_COUNT = -43
+SERIAL_READ_NO_DATA = -46
 BAD_EVENT_REQUEST = -72
 BAD_GPIO_NUMBER = -73
 CANNOT_OPEN_CHIP = -78
@@ -72,16 +80,22 @@ GPIO_NOT_AN_OUTPUT = -104
 
 _ERRORS = {
     OKAY: "No error",
+    BAD_PATHNAME: "can not open pathname",
     BAD_HANDLE: "unknown handle",
     I2C_OPEN_FAILED: "can not open I2C device",
+    SERIAL_OPEN_FAILED: "can not open serial device",
     SPI_OPEN_FAILED: "can not open SPI device",
     BAD_I2C_BUS: "bad I2C bus",
     BAD_I2C_ADDR: "bad I2C address",
     BAD_SPI_CHANNEL: "bad SPI channel",
+    BAD_SERIAL_FLAGS: "bad serial open flags",
+    BAD_SERIAL_SPEED: "bad serial baud rate",
     BAD_I2C_PARAM: "bad I2C parameter",
+    BAD_SERIAL_PARAM: "bad serial parameter",
     I2C_WRITE_FAILED: "I2C write failed",
     I2C_READ_FAILED: "I2C read failed",
     BAD_SPI_COUNT: "bad SPI count",
+    SERIAL_READ_NO_DATA: "ser read no data available",
     BAD_EVENT_REQUEST: "bad event request",
     BAD_GPIO_NUMBER: "bad GPIO number",
     CANNOT_OPEN_CHIP: "can not open gpiochip",
@@ -159,8 +173,17 @@ class _Claim:
         self.group: int | None = None  # the leader, while in a group
         self.debounce_us = 0
         self.watchdog_us = 0
+        self.notify: int | None = None  # notification handle; None: the callbacks
         self.reported: int | None = None  # last level an alert reported
-        self.timer: threading.Timer | None = None
+        self.reported_ns = 0  # when it was reported
+        self.timer: threading.Timer | None = None  # debounce
+        self.watchdog: threading.Timer | None = None
+
+    def cancel_timers(self) -> None:
+        for timer in (self.timer, self.watchdog):
+            if timer is not None:
+                timer.cancel()
+        self.timer = self.watchdog = None
 
     @property
     def active_low(self) -> bool:
@@ -175,6 +198,8 @@ _groups: dict[int, list[int]] = {}  # leader → its GPIOs
 _callbacks: list[_callback] = []
 _i2c: dict[int, buses.I2CClient] = {}
 _spi: dict[int, tuple[int, int]] = {}
+_serial: dict[int, buses.Port] = {}
+_notify: dict[int, _Notify] = {}
 
 
 def _new_handle(registry: dict, value: object) -> int:
@@ -279,8 +304,8 @@ def _claim(handle: int, gpio: int, flags: int, output: bool, level: int = 0) -> 
         claim = _claims.get(gpio)
         if claim is not None and claim.handle != handle & 0xFFFF:
             return GPIO_BUSY
-        if claim is not None and claim.timer is not None:
-            claim.timer.cancel()
+        if claim is not None:
+            claim.cancel_timers()
         new = _Claim(handle & 0xFFFF, flags, output)
         if claim is not None:  # reclaiming keeps the debounce and watchdog settings
             new.debounce_us, new.watchdog_us = claim.debounce_us, claim.watchdog_us
@@ -305,12 +330,16 @@ def gpio_claim_alert(
 ) -> int:
     if eFlags not in (RISING_EDGE, FALLING_EDGE, BOTH_EDGES):
         return _status(BAD_EVENT_REQUEST)
+    with _lock:
+        if notify_handle is not None and notify_handle not in _notify:
+            return _status(BAD_HANDLE)
     code = _claim(handle, gpio, lFlags, output=False)
     if code:
         return _status(code)
     with _lock:
         claim = _claims[gpio]
         claim.alert = eFlags
+        claim.notify = notify_handle
         claim.reported = pins.read(gpio) ^ claim.active_low
     return OKAY
 
@@ -318,8 +347,8 @@ def gpio_claim_alert(
 def _free(gpio: int) -> None:
     with _lock:
         claim = _claims.pop(gpio, None)
-        if claim is not None and claim.timer is not None:
-            claim.timer.cancel()
+        if claim is not None:
+            claim.cancel_timers()
     pins.release(gpio)
 
 
@@ -439,7 +468,7 @@ def group_write(handle: int, gpio: int, group_bits: int, group_mask: int = GROUP
     return OKAY
 
 
-# ── PWM and servo pulses (recorded, not toggled) ─────────────────────────────
+# ── PWM and servo pulses ─────────────────────────────────────────────────────
 
 def _output(handle: int, gpio: int) -> int:
     code, claim = _owned(handle, gpio)
@@ -504,13 +533,18 @@ def gpio_set_debounce_micros(handle: int, gpio: int, debounce_micros: int) -> in
 
 
 def gpio_set_watchdog_micros(handle: int, gpio: int, watchdog_micros: int) -> int:
-    """Accepted and stored; the stub never sends watchdog (TIMEOUT) alerts."""
+    """After an edge alert, one TIMEOUT alert follows if no other edge comes within
+    *watchdog_micros*; the next edge alert rearms it. 0 turns the watchdog off."""
     code, claim = _owned(handle, gpio)
     if code:
         return _status(code)
     if not 0 <= watchdog_micros <= 300_000_000:
         return _status(BAD_WATCHDOG_MICS)
-    claim.watchdog_us = watchdog_micros
+    with _lock:
+        claim.watchdog_us = watchdog_micros
+        if claim.watchdog is not None and not watchdog_micros:
+            claim.watchdog.cancel()
+            claim.watchdog = None
     return OKAY
 
 
@@ -563,9 +597,40 @@ def _alert(gpio: int, claim: _Claim) -> None:
         claim.reported = level
         if not claim.alert & (RISING_EDGE if level else FALLING_EDGE):
             return
+        tick = time.monotonic_ns()
+        claim.reported_ns = tick
+        if claim.watchdog is not None:
+            claim.watchdog.cancel()
+            claim.watchdog = None
+        if claim.watchdog_us:
+            claim.watchdog = threading.Timer(claim.watchdog_us / 1e6, _timeout, (gpio, claim))
+            claim.watchdog.daemon = True
+            claim.watchdog.start()
+    _report(gpio, claim, level, tick)
+
+
+def _timeout(gpio: int, claim: _Claim) -> None:
+    """The watchdog ran out: one TIMEOUT alert, until the next edge alert."""
+    with _lock:
+        if _claims.get(gpio) is not claim or claim.watchdog is None:
+            return
+        claim.watchdog = None
+        tick = claim.reported_ns + claim.watchdog_us * 1000
+    _report(gpio, claim, TIMEOUT, tick)
+
+
+def _report(gpio: int, claim: _Claim, level: int, tick: int) -> None:
+    """Send an alert to the claim's notification pipe, or to the callbacks."""
+    with _lock:
         chip = _chips.get(claim.handle)
+        if chip is None:
+            return
+        if claim.notify is not None:
+            pipe = _notify.get(claim.notify)
+            if pipe is not None:
+                pipe.send(chip, gpio, level, tick)
+            return
         targets = [cb for cb in _callbacks if cb.chip == chip and cb.gpio == gpio]
-    tick = time.monotonic_ns()
     for cb in targets:
         try:
             cb.func(chip, gpio, level, tick)
@@ -593,6 +658,83 @@ def _on_change(change: pins.Change) -> None:
 
 
 pins.watch(_on_change)
+
+
+# ── notification pipes ───────────────────────────────────────────────────────
+
+_REPORT = struct.Struct("QBBBBI")  # timestamp, chip, gpio, level, flags, padding
+
+
+class _Notify:
+    """A FIFO named .lgd-nfy<handle> in lgpio's working directory ($LG_WD, else the
+    current one): each alert sent to it is a 16-byte report."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        os.mkfifo(path, 0o664)
+        # Read-write, so writing never blocks for want of a reader, as lgpio opens it
+        self.fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        self.paused = False
+
+    def send(self, chip: int, gpio: int, level: int, tick: int) -> None:
+        if self.paused:
+            return
+        try:
+            os.write(self.fd, _REPORT.pack(tick, chip, gpio, level, 0, 0))
+        except BlockingIOError:
+            pass  # the reader fell behind and the pipe is full: the report is lost
+
+    def close(self) -> None:
+        os.close(self.fd)
+        try:
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+
+
+def notify_open() -> int:
+    workdir = os.environ.get("LG_WD") or os.getcwd()
+    with _lock:
+        handle = _new_handle(_notify, None)
+        try:
+            _notify[handle] = _Notify(os.path.join(workdir, f".lgd-nfy{handle}"))
+        except OSError:
+            del _notify[handle]
+            return _status(BAD_PATHNAME)
+    return handle
+
+
+def _notify_state(handle: int, paused: bool) -> int:  # noqa: FBT001
+    with _lock:
+        pipe = _notify.get(handle)
+        if pipe is None:
+            return _status(BAD_HANDLE)
+        pipe.paused = paused
+    return OKAY
+
+
+def notify_pause(handle: int) -> int:
+    return _notify_state(handle, paused=True)
+
+
+def notify_resume(handle: int) -> int:
+    return _notify_state(handle, paused=False)
+
+
+def notify_close(handle: int) -> int:
+    with _lock:
+        pipe = _notify.pop(handle, None)
+        if pipe is None:
+            return _status(BAD_HANDLE)
+        for claim in _claims.values():
+            if claim.notify == handle:
+                claim.notify = None
+    pipe.close()
+    return OKAY
 
 
 # ── I2C ───────────────────────────────────────────────────────────────────────
@@ -737,15 +879,90 @@ def spi_xfer(handle: int, data) -> tuple[int, bytearray]:
     return _spi_xfer(handle, _bytes(data))
 
 
+# ── serial ────────────────────────────────────────────────────────────────────
+
+BAUD_RATES = (50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800, 9600, 19200,
+              38400, 57600, 115200, 230400)
+
+
+def serial_open(tty: str, baud: int, ser_flags: int = 0) -> int:
+    if baud not in BAUD_RATES:
+        return _status(BAD_SERIAL_SPEED)
+    if ser_flags:
+        return _status(BAD_SERIAL_FLAGS)
+    try:
+        port = buses.uart(tty)
+    except FileNotFoundError:
+        return _status(SERIAL_OPEN_FAILED)
+    with _lock:
+        port.flush_input()  # lgpio flushes what arrived before the open
+        return _new_handle(_serial, port)
+
+
+def serial_close(handle: int) -> int:
+    with _lock:
+        return OKAY if _serial.pop(handle, None) is not None else _status(BAD_HANDLE)
+
+
+def _port(handle: int) -> buses.Port | None:
+    with _lock:
+        return _serial.get(handle)
+
+
+def serial_read_byte(handle: int) -> int:
+    port = _port(handle)
+    if port is None:
+        return _status(BAD_HANDLE)
+    data = port.read(1, timeout=0)
+    return data[0] if data else _status(SERIAL_READ_NO_DATA)
+
+
+def serial_write_byte(handle: int, byte_val: int) -> int:
+    port = _port(handle)
+    if port is None:
+        return _status(BAD_HANDLE)
+    port.write(bytes([byte_val & 0xFF]))
+    return OKAY
+
+
+def serial_read(handle: int, count: int = 1000) -> tuple[int, bytearray]:
+    """What is waiting, up to *count* bytes: (0, empty) when nothing is."""
+    if count <= 0:
+        return (_status(BAD_SERIAL_PARAM), bytearray())
+    port = _port(handle)
+    if port is None:
+        return (_status(BAD_HANDLE), bytearray())
+    data = port.read(count, timeout=0)
+    return len(data), bytearray(data)
+
+
+def serial_write(handle: int, data) -> int:
+    port = _port(handle)
+    if port is None:
+        return _status(BAD_HANDLE)
+    port.write(_bytes(data))
+    return OKAY
+
+
+def serial_data_available(handle: int) -> int:
+    port = _port(handle)
+    if port is None:
+        return _status(BAD_HANDLE)
+    return port.waiting()
+
+
 def _reset() -> None:
     """Close every handle (between tests)."""
     with _lock:
         for claim in _claims.values():
-            if claim.timer is not None:
-                claim.timer.cancel()
+            claim.cancel_timers()
+        for pipe in _notify.values():
+            pipe.close()
         _chips.clear()
         _claims.clear()
         _groups.clear()
         _callbacks.clear()
         _i2c.clear()
         _spi.clear()
+        _serial.clear()
+        _notify.clear()

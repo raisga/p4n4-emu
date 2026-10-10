@@ -1,0 +1,13 @@
+name: rpi3
+description: "Raspberry Pi 3 Model B — 1 GB"
+# 64-bit Raspberry Pi OS. Use --arch armv7 for the 32-bit OS (few stack images publish armv7)
+arch: arm64
+board: rpi3
+cpus: 4
+# 1 GB less what the GPU and the OS keep
+memory: "768m"
+memory_swap: "768m"
+blkio_weight: 150
+# The SD card interface tops out near 22 MB/s
+blkio_read_bps: 23068672
+blkio_write_bps: 23068672

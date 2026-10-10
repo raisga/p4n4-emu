@@ -27,15 +27,17 @@ class Board:
     chip_label: str  # the header's gpiochip label
     lines: int  # lines on that gpiochip
     chips: tuple[int, ...]  # /dev/gpiochipN numbers that reach the header
+    compatible: tuple[str, ...]  # /proc/device-tree/compatible
 
     @property
     def type(self) -> str:
-        types = {0x11: "Pi 4 Model B", 0x17: "Pi 5 Model B"}
+        types = {0x08: "Pi 3 Model B", 0x11: "Pi 4 Model B", 0x12: "Zero 2 W",
+                 0x17: "Pi 5 Model B"}
         return types.get(self.revision >> 4 & 0xFF, "Unknown")
 
     @property
     def processor(self) -> str:
-        return {3: "BCM2711", 4: "BCM2712"}.get(self.revision >> 12 & 0xF, "Unknown")
+        return {2: "BCM2837", 3: "BCM2711", 4: "BCM2712"}.get(self.revision >> 12 & 0xF, "Unknown")
 
     @property
     def memory_mb(self) -> int:
@@ -49,16 +51,25 @@ class Board:
             "TYPE": self.type,
             "MANUFACTURER": "Sony UK",
             "PROCESSOR": self.processor,
-            "RAM": f"{self.memory_mb // 1024}G",
+            "RAM": f"{self.memory_mb // 1024}G" if self.memory_mb >= 1024 else f"{self.memory_mb}M",
         }
 
 
 BOARDS = {
+    # Pi 3 Model B 1 GB, rev 1.2
+    "rpi3": Board("rpi3", "Raspberry Pi 3 Model B Rev 1.2", 0xA02082, "pinctrl-bcm2835", 54, (0,),
+                  ("raspberrypi,3-model-b", "brcm,bcm2837")),
     # Pi 4 Model B 4 GB, rev 1.4: the rpi4 profile's memory
-    "rpi4": Board("rpi4", "Raspberry Pi 4 Model B Rev 1.4", 0xC03114, "pinctrl-bcm2711", 58, (0,)),
+    "rpi4": Board("rpi4", "Raspberry Pi 4 Model B Rev 1.4", 0xC03114, "pinctrl-bcm2711", 58, (0,),
+                  ("raspberrypi,4-model-b", "brcm,bcm2711")),
     # Pi 5 Model B 8 GB, rev 1.0. Since kernel 6.6.45 the header is gpiochip0;
     # gpiochip4 remains as a link to it, and older code (gpiozero 2.0) opens that
-    "rpi5": Board("rpi5", "Raspberry Pi 5 Model B Rev 1.0", 0xD04170, "pinctrl-rp1", 54, (0, 4)),
+    "rpi5": Board("rpi5", "Raspberry Pi 5 Model B Rev 1.0", 0xD04170, "pinctrl-rp1", 54, (0, 4),
+                  ("raspberrypi,5-model-b", "brcm,bcm2712")),
+    # Zero 2 W 512 MB, rev 1.0: its RP3A0 reports itself as a BCM2837
+    "rpi-zero2w": Board("rpi-zero2w", "Raspberry Pi Zero 2 W Rev 1.0", 0x902120,
+                        "pinctrl-bcm2835", 54, (0,),
+                        ("raspberrypi,model-zero-2-w", "brcm,bcm2837")),
 }
 DEFAULT_BOARD = "rpi5"
 

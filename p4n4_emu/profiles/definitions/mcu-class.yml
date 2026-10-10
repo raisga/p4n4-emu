@@ -1,5 +1,9 @@
 name: mcu-class
-description: "MCU-class — 1 core / 256 MB (ultra-constrained)"
+# Not a microcontroller: an x86 Linux container squeezed to 256 MB, to see how
+# the stacks behave at the bottom of the range. The iot stack doesn't fit (InfluxDB
+# alone uses more), so expect OOM kills. Real MCU nodes speak MQTT from firmware;
+# the sensor simulator stands in for them.
+description: "Ultra-constrained Linux — 1 core / 256 MB (not an MCU)"
 arch: x86_64
 cpus: 1
 memory: "256m"

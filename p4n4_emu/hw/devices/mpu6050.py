@@ -10,7 +10,7 @@ from __future__ import annotations
 import random
 
 from p4n4_emu.hw.buses import RegisterDevice
-from p4n4_emu.hw.readings import Readings
+from p4n4_emu.hw.readings import Readings, feeds
 
 WHO_AM_I = 0x68
 
@@ -34,9 +34,14 @@ def _int16(value: float) -> int:
 
 
 class MPU6050(RegisterDevice):
-    def __init__(self, readings: Readings | None = None) -> None:
+    INPUTS = ("temperature",)  # the die temperature; acceleration is the raw measurement's
+
+    def __init__(
+        self, readings: Readings | None = None, measurements: dict[str, str] | None = None
+    ) -> None:
         super().__init__()
         self.readings = readings or Readings()
+        self.inputs = feeds(self.INPUTS, measurements)
         self._reset()
 
     def _reset(self) -> None:
@@ -54,7 +59,7 @@ class MPU6050(RegisterDevice):
         accel_lsb = ACCEL_LSB[self.regs.get(REG_ACCEL_CONFIG, 0) >> 3 & 0b11]
         gyro_lsb = GYRO_LSB[self.regs.get(REG_GYRO_CONFIG, 0) >> 3 & 0b11]
         x, y, z = self.readings.acceleration()
-        temperature = self.readings.value("temperature")
+        temperature = self.readings.value(self.inputs["temperature"])
         words = [
             x * accel_lsb, y * accel_lsb, z * accel_lsb,
             (temperature - 36.53) * 340,  # datasheet: °C = raw / 340 + 36.53

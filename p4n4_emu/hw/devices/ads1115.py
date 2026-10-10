@@ -10,7 +10,7 @@ default), so a scenario can give a channel its own wave.
 from __future__ import annotations
 
 from p4n4_emu.hw.buses import I2CDevice
-from p4n4_emu.hw.readings import Readings
+from p4n4_emu.hw.readings import Readings, feeds
 from p4n4_emu.sim.scenario import Wave
 
 REG_CONVERSION = 0
@@ -37,11 +37,13 @@ DEFAULT_INPUTS = (
 
 
 class ADS1115(I2CDevice):
+    INPUTS = ("a0", "a1", "a2", "a3")
+
     def __init__(
-        self, readings: Readings | None = None, channels: tuple[str, ...] = ("a0", "a1", "a2", "a3")
+        self, readings: Readings | None = None, measurements: dict[str, str] | None = None
     ) -> None:
         self.readings = readings or Readings()
-        self.channels = channels
+        self.inputs = feeds(self.INPUTS, measurements)
         self.pointer = REG_CONVERSION
         self.regs = {
             REG_CONVERSION: 0, REG_CONFIG: CONFIG_RESET, REG_LO_THRESH: 0x8000,
@@ -49,7 +51,7 @@ class ADS1115(I2CDevice):
         }
 
     def voltage(self, channel: int) -> float:
-        return self.readings.value(self.channels[channel], DEFAULT_INPUTS[channel])
+        return self.readings.value(self.inputs[self.INPUTS[channel]], DEFAULT_INPUTS[channel])
 
     def convert(self) -> None:
         config = self.regs[REG_CONFIG]

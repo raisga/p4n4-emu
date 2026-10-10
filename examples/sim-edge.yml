@@ -1,0 +1,37 @@
+# Firmware-like devices, media feeds for the edge runner, and a replay.
+# Check it with `p4n4-emu sim check examples/sim-edge.yml`; run it with
+# `p4n4-emu sim start --scenario examples/sim-edge.yml`.
+
+interval: 5
+seed: 7
+
+devices:
+  # Always connected; loses Wi-Fi now and then, and keeps 20 readings until it's back
+  - id: esp32-greenhouse
+    measurements: [temperature, humidity]
+    mcu:
+      type: esp32
+      firmware: 1.4.2
+      location: greenhouse
+      boot: 3                                    # power-on to first reading
+      wifi_drop: {probability: 0.02, duration: 45}
+      buffer: 20
+
+  # Battery node: wakes every 5 minutes, reads, publishes and sleeps again
+  - id: esp32-soil-{n}
+    count: 2
+    measurements:
+      soil_moisture: {base: 35, amplitude: 10, period: 3600, min: 0, max: 100, unit: "%"}
+    mcu: {type: esp32-c3, firmware: 0.9.0, sleep: 300, boot: 2}
+
+  # A camera and a microphone for ei-runner: point MQTT_TOPIC_INPUT at
+  # sensors/+/camera (or sensors/+/mic) in the edge stack
+  - id: cam-door
+    interval: 2
+    measurements:
+      camera: {kind: image, width: 96, height: 96}              # packed RGB, 9216 values
+      mic: {kind: audio, sample_rate: 16000, window: 1.0, frequency: 880, noise: 0.1}
+
+replay:
+  # A morning recorded in the iot stack, ten times faster, over and over
+  - {file: sim-recording.csv, speed: 10, loop: true, devices: {greenhouse-01: replayed-01}}

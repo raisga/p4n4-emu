@@ -1,6 +1,9 @@
 """Tests for the lgpio and gpiod stubs, and for gpiozero running on lgpio."""
 
+import errno
+import os
 import select
+import struct
 import threading
 import time
 from datetime import timedelta
@@ -279,3 +282,305 @@ def test_gpiozero_pwm_led(gpiozero):
     led.value = 0.5
     assert pins.get(18).pwm == (100.0, 50.0)
     led.close()
+
+
+# ── lgpio: watchdog, notification pipes, serial ──────────────────────────────
+
+def test_lgpio_watchdog_sends_one_timeout_after_an_edge(chip):
+    seen = []
+    lgpio.gpio_claim_alert(chip, 23, lgpio.BOTH_EDGES)
+    lgpio.gpio_set_watchdog_micros(chip, 23, 30_000)
+    lgpio.callback(chip, 23, lgpio.BOTH_EDGES, lambda c, g, level, t: seen.append(level))
+    time.sleep(0.08)
+    assert seen == []  # no watchdog before the first edge, as in lgpio
+    pins.drive(23, 1)
+    time.sleep(0.12)
+    assert seen == [1, lgpio.TIMEOUT]  # one timeout per stream of edges
+    pins.drive(23, 0)
+    time.sleep(0.01)
+    lgpio.gpio_set_watchdog_micros(chip, 23, 0)
+    time.sleep(0.06)
+    assert seen == [1, lgpio.TIMEOUT, 0]
+
+
+def test_lgpio_watchdog_range(chip):
+    lgpio.gpio_claim_input(chip, 23)
+    with pytest.raises(lgpio.error, match="bad watchdog microseconds"):
+        lgpio.gpio_set_watchdog_micros(chip, 23, -1)
+
+
+def test_lgpio_notification_pipe(chip, tmp_path, monkeypatch):
+    monkeypatch.setenv("LG_WD", str(tmp_path))
+    seen = []
+    lgpio.callback(chip, 24, lgpio.BOTH_EDGES, lambda *a: seen.append(a))
+    nfy = lgpio.notify_open()
+    fifo = tmp_path / f".lgd-nfy{nfy}"
+    assert fifo.exists()
+    lgpio.gpio_claim_alert(chip, 24, lgpio.RISING_EDGE, notify_handle=nfy)
+    fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        pins.drive(24, 1)
+        tick, chip_no, gpio, level, flags, _ = struct.unpack("QBBBBI", os.read(fd, 16))
+        assert (chip_no, gpio, level, flags) == (0, 24, 1, 0)
+        assert tick > 0
+        assert seen == []  # alerts for a notification handle skip the callbacks
+        lgpio.notify_pause(nfy)
+        pins.drive(24, 0)
+        pins.drive(24, 1)
+        with pytest.raises(BlockingIOError):
+            os.read(fd, 16)
+        lgpio.notify_resume(nfy)
+        pins.drive(24, 0)
+        pins.drive(24, 1)
+        assert len(os.read(fd, 64)) == 16  # rising edges only
+    finally:
+        os.close(fd)
+    lgpio.notify_close(nfy)
+    assert not fifo.exists()
+    with pytest.raises(lgpio.error, match="unknown handle"):
+        lgpio.notify_close(nfy)
+    with pytest.raises(lgpio.error, match="unknown handle"):
+        lgpio.gpio_claim_alert(chip, 25, lgpio.RISING_EDGE, notify_handle=nfy)
+
+
+def test_lgpio_serial():
+    from p4n4_emu.hw import buses
+
+    port = buses.uart("/dev/serial0")
+    port.feed(b"stale")
+    h = lgpio.serial_open("/dev/serial0", 9600)
+    assert lgpio.serial_data_available(h) == 0  # flushed on open
+    assert lgpio.serial_read(h) == (0, bytearray())
+    with pytest.raises(lgpio.error, match="ser read no data available"):
+        lgpio.serial_read_byte(h)
+    port.feed(b"$GPGGA")
+    assert lgpio.serial_data_available(h) == 6
+    assert lgpio.serial_read_byte(h) == ord("$")
+    assert lgpio.serial_read(h, 3) == (3, bytearray(b"GPG"))
+    lgpio.serial_write(h, "AT\r\n")
+    lgpio.serial_write_byte(h, 0x55)
+    assert bytes(port.tx) == b"AT\r\n\x55"
+    lgpio.serial_close(h)
+    with pytest.raises(lgpio.error, match="unknown handle"):
+        lgpio.serial_read(h)
+
+
+@pytest.mark.parametrize(
+    ("args", "error"),
+    [
+        (("/dev/serial0", 12345), "bad serial baud rate"),
+        (("/dev/serial0", 9600, 1), "bad serial open flags"),
+        (("/dev/ttyUSB7", 9600), "can not open serial device"),
+    ],
+)
+def test_lgpio_serial_open_errors(args, error):
+    with pytest.raises(lgpio.error, match=error):
+        lgpio.serial_open(*args)
+
+
+def test_lgpio_serial_loopback_part():
+    from p4n4_emu.hw import buses
+
+    buses.attach_uart("/dev/ttyUSB0", buses.Loopback())
+    h = lgpio.serial_open("/dev/ttyUSB0", 115200)
+    lgpio.serial_write(h, b"echo")
+    assert lgpio.serial_read(h, 100) == (4, bytearray(b"echo"))
+
+
+# ── PWM toggles the level ────────────────────────────────────────────────────
+
+def test_pwm_level_follows_the_duty_cycle(chip):
+    lgpio.gpio_claim_output(chip, 18)
+    lgpio.tx_pwm(chip, 18, 1000, 25)
+    samples = []
+    end = time.monotonic() + 0.2
+    while time.monotonic() < end:
+        samples.append(lgpio.gpio_read(chip, 18))
+    assert 0.1 < sum(samples) / len(samples) < 0.4
+    lgpio.tx_pwm(chip, 18, 0, 0)
+    assert pins.read(18) == 0 and pins.get(18).pwm is None
+
+
+def test_pwm_at_0_or_100_percent_holds_the_level(chip):
+    lgpio.gpio_claim_output(chip, 18)
+    lgpio.tx_pwm(chip, 18, 1000, 100)
+    assert all(pins.read(18) == 1 for _ in range(200))
+    lgpio.tx_pwm(chip, 18, 1000, 0)
+    assert all(pins.read(18) == 0 for _ in range(200))
+
+
+def test_slow_pwm_toggles_as_changes_watchers_see():
+    changes = []
+
+    def watcher(change):
+        if change.gpio == 12 and change.edge:
+            changes.append((change.pin.level, change.timestamp_ns))
+
+    pins.watch(watcher)
+    try:
+        pins.setup_output(12, 0)
+        pins.set_pwm(12, 10, 50)  # 50 ms high, 50 ms low
+        time.sleep(0.33)
+        pins.set_pwm(12, 0, 0)
+    finally:
+        pins.unwatch(watcher)
+    levels = [level for level, _ in changes]
+    assert 5 <= len(levels) <= 9
+    assert all(a != b for a, b in zip(levels, levels[1:], strict=False))
+    gaps = [(b - a) / 1e6 for (_, a), (_, b) in zip(changes, changes[1:], strict=False)][:-1]
+    assert all(30 < gap < 90 for gap in gaps), gaps
+
+
+def test_fast_pwm_doesnt_flood_watchers():
+    changes = []
+    pins.watch(changes.append)
+    try:
+        pins.setup_output(13, 0)
+        pins.set_pwm(13, 2000, 50)
+        time.sleep(0.1)
+    finally:
+        pins.unwatch(changes.append)
+    assert len(changes) <= 2  # the output set up, PWM started
+
+
+def test_rpi_gpio_pwm_toggles():
+    gpio_stub.setmode(gpio_stub.BCM)
+    gpio_stub.setup(18, gpio_stub.OUT)
+    pwm = gpio_stub.PWM(18, 500)
+    pwm.start(80)
+    samples = [gpio_stub.input(18) for _ in range(20000)]
+    assert 0.6 < sum(samples) / len(samples) < 0.95
+    pwm.stop()
+    assert gpio_stub.input(18) == 0
+
+
+# ── gpiod v1 ──────────────────────────────────────────────────────────────────
+
+def test_gpiod_v1_chip_lookup():
+    from p4n4_emu.hw import gpiod_v1_stub as g1
+
+    for descr in ("gpiochip0", "/dev/gpiochip0", "0", "pinctrl-rp1"):
+        with g1.Chip(descr) as chip:
+            assert chip.name() == "gpiochip0"
+            assert chip.label() == "pinctrl-rp1"
+            assert chip.num_lines() == 54
+    assert g1.Chip("4").name() == "gpiochip4"
+    with pytest.raises(FileNotFoundError):
+        g1.Chip("gpiochip9")
+    with pytest.raises(FileNotFoundError):
+        g1.Chip("0", g1.Chip.OPEN_BY_NAME)
+    chip = g1.Chip("gpiochip0")
+    chip.close()
+    with pytest.raises(ValueError, match="closed"):
+        chip.get_line(17)
+    assert [c.name() for c in g1.ChipIter()] == ["gpiochip0", "gpiochip4"]
+
+
+def test_gpiod_v1_output_and_input():
+    from p4n4_emu.hw import gpiod_v1_stub as g1
+
+    chip = g1.Chip("gpiochip0")
+    led = chip.get_line(17)
+    assert not led.is_requested() and led.consumer() is None
+    led.request(consumer="led", type=g1.LINE_REQ_DIR_OUT, default_val=1)
+    assert pins.read(17) == 1 and led.get_value() == 1
+    assert led.direction() == g1.Line.DIRECTION_OUTPUT and led.consumer() == "led"
+    led.set_value(0)
+    assert pins.read(17) == 0
+    with pytest.raises(OSError) as e:
+        g1.Chip("gpiochip0").get_line(17).request(consumer="other", type=g1.LINE_REQ_DIR_IN)
+    assert e.value.errno == errno.EBUSY
+
+    button = chip.find_line("GPIO27")
+    button.request(consumer="btn", type=g1.LINE_REQ_DIR_IN,
+                   flags=g1.LINE_REQ_FLAG_BIAS_PULL_UP | g1.LINE_REQ_FLAG_ACTIVE_LOW)
+    assert button.get_value() == 0  # pulled up, active low
+    assert button.bias() == g1.Line.BIAS_PULL_UP
+    assert button.active_state() == g1.Line.ACTIVE_LOW
+    pins.drive(27, 0)
+    assert button.get_value() == 1
+    with pytest.raises(OSError) as e:
+        button.set_value(1)
+    assert e.value.errno == errno.EPERM
+    led.release()
+    assert not led.is_requested() and pins.get(17).function is None
+    with pytest.raises(OSError):
+        led.get_value()
+    assert g1.find_line("GPIO5").offset() == 5
+    assert g1.find_line("nope") is None
+
+
+def test_gpiod_v1_bulk():
+    from p4n4_emu.hw import gpiod_v1_stub as g1
+
+    chip = g1.Chip("gpiochip0")
+    bulk = chip.get_lines([5, 6, 13])
+    bulk.request(consumer="bar", type=g1.LINE_REQ_DIR_OUT, default_vals=[1, 0, 1])
+    assert [pins.read(g) for g in (5, 6, 13)] == [1, 0, 1]
+    bulk.set_values([0, 1, 1])
+    assert bulk.get_values() == [0, 1, 1]
+    bulk.set_direction_input()
+    assert all(pins.get(g).function == pins.INPUT for g in (5, 6, 13))
+    bulk.set_direction_output([1, 1, 0])
+    assert [pins.read(g) for g in (5, 6, 13)] == [1, 1, 0]
+    assert len(bulk) == 3 and [ln.offset() for ln in bulk] == [5, 6, 13]
+    bulk.release()
+
+
+def test_gpiod_v1_edge_events():
+    from p4n4_emu.hw import gpiod_v1_stub as g1
+
+    line = g1.Chip("gpiochip0").get_line(22)
+    line.request(consumer="ev", type=g1.LINE_REQ_EV_BOTH_EDGES,
+                 flags=g1.LINE_REQ_FLAG_BIAS_PULL_DOWN)
+    assert not line.event_wait(sec=0, nsec=1_000_000)  # the bias isn't an event
+    pins.drive(22, 1)
+    pins.drive(22, 0)
+    ready, _, _ = select.select([line.event_get_fd()], [], [], 1)
+    assert ready
+    assert line.event_wait(sec=1)
+    first = line.event_read()
+    assert first.type == g1.LineEvent.RISING_EDGE and first.source.offset() == 22
+    assert first.source is line
+    (second,) = line.event_read_multiple()
+    assert second.type == g1.LineEvent.FALLING_EDGE
+    assert (second.sec, second.nsec) >= (first.sec, first.nsec)
+    with pytest.raises(OSError) as e:
+        line.set_value(1)
+    assert e.value.errno == errno.EPERM
+
+
+def test_gpiod_v1_event_read_blocks_until_an_edge():
+    from p4n4_emu.hw import gpiod_v1_stub as g1
+
+    line = g1.Chip("gpiochip0").get_line(26)
+    line.request(consumer="ev", type=g1.LINE_REQ_EV_RISING_EDGE)
+    threading.Timer(0.05, pins.drive, (26, 1)).start()
+    assert line.event_read().type == g1.LineEvent.RISING_EDGE
+
+
+def test_gpiod_v1_events_on_a_plain_request_are_refused():
+    from p4n4_emu.hw import gpiod_v1_stub as g1
+
+    line = g1.Chip("gpiochip0").get_line(26)
+    line.request(consumer="in", type=g1.LINE_REQ_DIR_IN)
+    with pytest.raises(OSError) as e:
+        line.event_wait(sec=0)
+    assert e.value.errno == errno.EPERM
+
+
+def test_shims_choose_the_gpiod_api():
+    import sys
+
+    shims.install(board="rpi5", parts=False, files=False, gpiod_api="v1")
+    import gpiod
+
+    assert gpiod.version_string() == "1.6.3"
+    assert "gpiod.line" not in sys.modules
+    shims.reset()
+    shims.install(board="rpi5", parts=False, files=False)
+    import gpiod
+
+    assert gpiod.__version__.startswith("2.")
+    with pytest.raises(ValueError, match="Unknown gpiod API"):
+        shims.modules("v3")

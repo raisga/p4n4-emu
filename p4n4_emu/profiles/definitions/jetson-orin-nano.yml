@@ -1,0 +1,13 @@
+name: jetson-orin-nano
+description: "NVIDIA Jetson Orin Nano — 8 GB, 6 cores, GPU"
+arch: arm64
+# ollama and ei-runner reserve the GPU when the host has an NVIDIA one; without it
+# (or under QEMU) they run on the CPU. The GPU shares the 8 GB with the CPU
+gpu: nvidia
+cpus: 6
+memory: "7168m"
+memory_swap: "7168m"
+blkio_weight: 500
+# NVMe SSD
+blkio_read_bps: 524288000
+blkio_write_bps: 524288000

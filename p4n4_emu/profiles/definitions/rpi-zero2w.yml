@@ -1,0 +1,11 @@
+name: rpi-zero2w
+description: "Raspberry Pi Zero 2 W — 512 MB"
+arch: arm64
+board: rpi-zero2w
+cpus: 4
+# 512 MB less what the GPU and the OS keep: too little for the whole iot stack
+memory: "384m"
+memory_swap: "384m"
+blkio_weight: 100
+blkio_read_bps: 23068672
+blkio_write_bps: 23068672

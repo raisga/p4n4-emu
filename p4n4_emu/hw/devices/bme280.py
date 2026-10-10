@@ -10,7 +10,7 @@ simulated values, so any driver that follows the datasheet reads them.
 from __future__ import annotations
 
 from p4n4_emu.hw.buses import RegisterDevice
-from p4n4_emu.hw.readings import Readings
+from p4n4_emu.hw.readings import Readings, feeds
 
 CHIP_ID = 0x60
 RESET_WORD = 0xB6
@@ -138,9 +138,14 @@ def adc_for(temperature_c: float, humidity_pct: float, pressure_hpa: float) -> t
 class BME280(RegisterDevice):
     """Sleep, forced and normal mode; a forced measurement goes back to sleep."""
 
-    def __init__(self, readings: Readings | None = None) -> None:
+    INPUTS = ("temperature", "humidity", "pressure")
+
+    def __init__(
+        self, readings: Readings | None = None, measurements: dict[str, str] | None = None
+    ) -> None:
         super().__init__()
         self.readings = readings or Readings()
+        self.inputs = feeds(self.INPUTS, measurements)
         self._reset()
 
     def _reset(self) -> None:
@@ -155,9 +160,9 @@ class BME280(RegisterDevice):
         return self.ctrl_meas & 0b11
 
     def measure(self) -> None:
-        r = self.readings
+        r, i = self.readings, self.inputs
         adc_t, adc_p, adc_h = adc_for(
-            r.value("temperature"), r.value("humidity"), r.value("pressure")
+            r.value(i["temperature"]), r.value(i["humidity"]), r.value(i["pressure"])
         )
         if not self.ctrl_meas >> 5:
             adc_t = SKIPPED_20

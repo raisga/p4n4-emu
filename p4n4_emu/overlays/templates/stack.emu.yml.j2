@@ -7,6 +7,9 @@ x-p4n4-emu:
 {% if platform %}
   platform: {{ platform }}
 {% endif %}
+{% if gpu %}
+  gpu: {{ gpu }}
+{% endif %}
 
 {% if not services %}
 services: {}
@@ -22,6 +25,13 @@ services:
         limits:
           cpus: "{{ svc.cpus }}"
           memory: "{{ svc.memory_mb }}m"
+        {% if svc.gpu %}
+        reservations:
+          devices:
+            - driver: {{ svc.gpu }}
+              count: 1
+              capabilities: [gpu]
+        {% endif %}
     memswap_limit: "{{ svc.memswap_mb }}m"
     {% if blkio_device %}
     blkio_config:

@@ -7,6 +7,11 @@ script on RPi.GPIO and the MQTT control channel all see the same pins.
 An input's level is what drives it from outside (drive(): a button, a sensor,
 `emu/gpio/<pin>/set`), or its pull when nothing does. Watchers see every
 change, from any thread; the front ends turn changes on inputs into edge events.
+
+An output running PWM toggles: it reads high for the duty cycle's part of each
+period. Up to TOGGLE_MAX_HZ every toggle is a change watchers see (a blinking
+LED on `emu/gpio/<pin>/state`); faster PWM only shows in what a read returns,
+so a dimmed LED or a buzzer can't flood the watchers.
 """
 
 from __future__ import annotations
@@ -25,6 +30,8 @@ PULL_OFF = "off"
 PULL_UP = "up"
 PULL_DOWN = "down"
 
+TOGGLE_MAX_HZ = 10.0
+
 
 @dataclass(frozen=True)
 class Pin:
@@ -33,6 +40,7 @@ class Pin:
     pull: str = PULL_OFF
     driven: int | None = None  # level forced from outside, None when nothing drives it
     pwm: tuple[float, float] | None = None  # (frequency in Hz, duty cycle in %)
+    pwm_since_ns: int = 0  # when PWM started (monotonic): where in its cycle it is
 
 
 @dataclass(frozen=True)
@@ -54,6 +62,8 @@ Watcher = Callable[[Change], None]
 _lock = threading.RLock()
 _pins: dict[int, Pin] = {}
 _watchers: list[Watcher] = []
+_wake = threading.Condition(_lock)  # PWM changed: the toggler recomputes its next edge
+_toggler: threading.Thread | None = None
 
 
 class PinError(ValueError):
@@ -67,9 +77,23 @@ def check(gpio: int) -> int:
     return gpio
 
 
+def pwm_level(pin: Pin, now_ns: int) -> int:
+    """The level of a PWM output at *now_ns*: high for the first duty % of each period."""
+    frequency, duty = pin.pwm
+    if duty <= 0:
+        return 0
+    if duty >= 100:
+        return 1
+    cycle = (now_ns - pin.pwm_since_ns) * frequency / 1e9 % 1.0
+    return int(cycle < duty / 100)
+
+
 def get(gpio: int) -> Pin:
     with _lock:
-        return _pins.get(check(gpio), Pin())
+        pin = _pins.get(check(gpio), Pin())
+    if pin.pwm is not None and pin.function == OUTPUT:
+        return replace(pin, level=pwm_level(pin, time.monotonic_ns()))
+    return pin
 
 
 def read(gpio: int) -> int:
@@ -82,9 +106,11 @@ def _input_level(pin: Pin) -> int:
     return 1 if pin.pull == PULL_UP else 0
 
 
-def _update(gpio: int, **changes) -> None:
+def _update(gpio: int, only_if: Callable[[Pin], bool] | None = None, **changes) -> None:
     with _lock:
         previous = _pins.get(check(gpio), Pin())
+        if only_if is not None and not only_if(previous):
+            return
         pin = replace(previous, **changes)
         if pin.function != OUTPUT:
             pin = replace(pin, level=_input_level(pin), pwm=None)
@@ -134,10 +160,68 @@ def drive(gpio: int, level: int | None) -> None:
 
 
 def set_pwm(gpio: int, frequency: float, duty: float) -> None:
-    """Start or change PWM on an output; a frequency of 0 stops it."""
-    if get(gpio).function != OUTPUT:
+    """Start or change PWM on an output; a frequency of 0 stops it, leaving it low.
+
+    A change of frequency or duty cycle keeps the cycle's phase, as a running
+    PWM generator does.
+    """
+    global _toggler
+    with _lock:
+        current = _pins.get(check(gpio), Pin())
+    if current.function != OUTPUT:
         raise PinError(f"GPIO {gpio} is not an output")
-    _update(gpio, pwm=(float(frequency), float(duty)) if frequency > 0 else None)
+    # Watchers run outside the lock (see _update), so the front ends' locks never nest in it
+    if frequency <= 0:
+        _update(gpio, pwm=None, level=0)
+        return
+    now = time.monotonic_ns()
+    pin = replace(current, pwm=(float(frequency), float(duty)),
+                  pwm_since_ns=current.pwm_since_ns if current.pwm else now)
+    _update(gpio, pwm=pin.pwm, pwm_since_ns=pin.pwm_since_ns, level=pwm_level(pin, now))
+    with _lock:
+        if _toggler is None and _toggles(pin):
+            _toggler = threading.Thread(target=_toggle_loop, name="p4n4-emu-pwm", daemon=True)
+            _toggler.start()
+        _wake.notify_all()
+
+
+def _toggles(pin: Pin) -> bool:
+    """Whether *pin* runs PWM whose toggles watchers see."""
+    return (
+        pin.function == OUTPUT and pin.pwm is not None
+        and pin.pwm[0] <= TOGGLE_MAX_HZ and 0 < pin.pwm[1] < 100
+    )
+
+
+def _next_edge(pin: Pin, now_ns: int) -> int:
+    frequency, duty = pin.pwm
+    period = 1e9 / frequency
+    into = (now_ns - pin.pwm_since_ns) % period
+    high = period * duty / 100
+    return now_ns + int((high - into) if into < high else (period - into)) + 1
+
+
+def _toggle_loop() -> None:
+    """Turn slow PWM into level changes, at each edge, until no pin toggles."""
+    global _toggler
+    while True:
+        with _lock:
+            now = time.monotonic_ns()
+            toggling = {g: p for g, p in _pins.items() if _toggles(p)}
+            if not toggling:
+                _toggler = None
+                return
+            levels = {g: pwm_level(p, now) for g, p in toggling.items()}
+            due = {g: level for g, level in levels.items() if level != toggling[g].level}
+        for gpio, level in due.items():
+            # Unless PWM stopped or changed meanwhile
+            pwm = toggling[gpio].pwm
+            _update(gpio, only_if=lambda p, pwm=pwm: p.pwm == pwm, level=level)
+        with _lock:
+            now = time.monotonic_ns()
+            toggling = [p for p in _pins.values() if _toggles(p)]
+            if toggling:
+                _wake.wait(max(0.0, (min(_next_edge(p, now) for p in toggling) - now) / 1e9))
 
 
 def claimed() -> dict[int, Pin]:
@@ -161,3 +245,4 @@ def reset() -> None:
     """Forget every pin (between tests); watchers stay."""
     with _lock:
         _pins.clear()
+        _wake.notify_all()

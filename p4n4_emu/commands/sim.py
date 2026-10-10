@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -15,7 +16,8 @@ from rich.console import Console
 from rich.table import Table
 
 from p4n4_emu import __version__
-from p4n4_emu.sim.scenario import Scenario, ScenarioError, load_scenario
+from p4n4_emu.sim import replay as replays
+from p4n4_emu.sim.scenario import Feed, Replay, Scenario, ScenarioError, Wave, load_scenario
 from p4n4_emu.utils.project import resolve_stack_dir
 from p4n4_emu.utils.stack_config import DEFAULT_BROKER_INFO, Broker, find_broker, load_config
 
@@ -33,6 +35,8 @@ _PACKAGE = Path(__file__).parent.parent
 
 # Where the files `sim start` mounts appear inside the container
 _MOUNT_DIR = "/etc/p4n4-sim"
+# The edge runner refuses samples with more values than this (its MAX_FEATURES default)
+RUNNER_MAX_FEATURES = 65536
 
 
 @dataclass(frozen=True)
@@ -57,27 +61,37 @@ def start_simulator(
     connection: Connection = Connection(),
     qos: int | None = None,
     retain: bool | None = None,
+    replay: Replay | None = None,
     rebuild: bool = False,
     broker_timeout: float = 60.0,
 ) -> int:
     """Get the image if needed, wait for the broker, and run the simulator.
 
-    Settings left as None use the scenario's, or the simulator's defaults. Returns the
-    exit code of the failing step, or 0 on success.
+    Settings left as None use the scenario's, or the simulator's defaults. *replay* is
+    replayed besides the scenario. Returns the exit code of the failing step, or 0 on
+    success.
     """
     loaded = None
-    if scenario is not None:
-        try:
+    try:
+        if scenario is not None:
             loaded = load_scenario(scenario)
-        except ScenarioError as e:
-            console.print(f"[red]{e}[/red]")
-            return 1
-        if devices is not None:
-            console.print("[red]--devices can't be used with a scenario, which lists them.[/red]")
-            return 1
+            if devices is not None:
+                console.print(
+                    "[red]--devices can't be used with a scenario, which lists them.[/red]"
+                )
+                return 1
+        # Check the recordings here, where an error is readable, not in the container
+        for r in [*(loaded.replays if loaded else ()), *([replay] if replay else [])]:
+            replays.load(r.file)
+    except ScenarioError as e:
+        console.print(f"[red]{e}[/red]")
+        return 1
 
     try:
-        options, env = _run_options(interval, devices, scenario, broker, connection, qos, retain)
+        options, env = _run_options(
+            interval, devices, scenario, broker, connection, qos, retain,
+            files=loaded.files if loaded else (), replay=replay,
+        )
     except FileNotFoundError as e:
         console.print(f"[red]File not found:[/red] {e}")
         return 1
@@ -109,7 +123,7 @@ def start_simulator(
     ).returncode
 
     if rc == 0:
-        summary = _describe(loaded, devices, interval, broker)
+        summary = _describe(loaded, devices, interval, broker, replay)
         console.print(f"[green]Sensor simulator started:[/green] {summary}")
     else:
         console.print("[red]Failed to start sensor simulator.[/red]")
@@ -124,6 +138,8 @@ def _run_options(
     connection: Connection,
     qos: int | None,
     retain: bool | None,
+    files: tuple[tuple[str, str], ...] = (),
+    replay: Replay | None = None,
 ) -> tuple[list[str], dict[str, str] | None]:
     """`docker run` options for the simulator's settings, and the environment to run it in.
 
@@ -139,6 +155,19 @@ def _run_options(
 
     if scenario is not None:
         mount(scenario, "scenario.yml", "SIM_SCENARIO")
+    if files:
+        # Each file the scenario names, and where the simulator finds it under that name
+        mapping = {}
+        for i, (written, path) in enumerate(files):
+            inside = f"{_MOUNT_DIR}/files/{i}-{Path(path).name}"
+            opts.extend(["-v", f"{Path(path).resolve(strict=True)}:{inside}:ro"])
+            mapping[written] = inside
+        opts.extend(["-e", f"SIM_FILES={json.dumps(mapping)}"])
+    if replay is not None:
+        mount(Path(replay.file), f"replay{Path(replay.file).suffix}", "SIM_REPLAY")
+        opts.extend(["-e", f"SIM_REPLAY_SPEED={replay.speed:g}"])
+        if replay.loop:
+            opts.extend(["-e", "SIM_REPLAY_LOOP=1"])
     if interval is not None:
         opts.extend(["-e", f"SIM_INTERVAL_SEC={interval}"])
     if devices is not None:
@@ -166,14 +195,25 @@ def _run_options(
 
 
 def _describe(
-    scenario: Scenario | None, devices: int | None, interval: float | None, broker: Broker
+    scenario: Scenario | None,
+    devices: int | None,
+    interval: float | None,
+    broker: Broker,
+    replay: Replay | None = None,
 ) -> str:
+    extra = f", replaying {Path(replay.file).name}" if replay else ""
     if scenario is None:
-        return f"{devices or 1} device(s) → {broker.host} every {interval or 2.0}s"
+        if replay is not None and devices is None:
+            return f"replaying {Path(replay.file).name} → {broker.host}"
+        return f"{devices or 1} device(s) → {broker.host} every {interval or 2.0}s{extra}"
     faults = sum(len(d.faults) for d in scenario.devices)
+    mcus = sum(d.mcu is not None for d in scenario.devices)
     return (
         f"{len(scenario.devices)} device(s) from the scenario → {broker.host}"
+        + (f", {mcus} firmware-like" if mcus else "")
         + (f", {faults} fault rule(s)" if faults else "")
+        + (f", {len(scenario.replays)} replay(s)" if scenario.replays else "")
+        + extra
     )
 
 
@@ -225,11 +265,27 @@ def start_cmd(
     retain: bool | None = typer.Option(
         None, "--retain/--no-retain", help="Publish with the retain flag. Default: the scenario's."
     ),
+    replay: Path | None = typer.Option(
+        None,
+        "--replay",
+        help="Recorded readings to publish again: a CSV (time,device,measurement,value,…) "
+        "or an InfluxDB CSV export. Alone, it is all the simulator publishes.",
+    ),
+    speed: float = typer.Option(
+        1.0, "--speed", min=0, help="Replay speed: 10 is ten times faster, 0 as fast as it can."
+    ),
+    loop: bool = typer.Option(False, "--loop", help="Start the replay over when it ends."),
     rebuild: bool = typer.Option(False, "--rebuild", help="Force rebuild of the image."),
 ) -> None:
     """Start the sensor simulator container."""
     if (cert_file is None) != (key_file is None):
         console.print("[red]--cert-file and --key-file go together.[/red]")
+        raise typer.Exit(1)
+    if replay is None and (speed != 1.0 or loop):
+        console.print("[red]--speed and --loop go with --replay.[/red]")
+        raise typer.Exit(1)
+    if loop and speed == 0:
+        console.print("[red]--loop needs a --speed above 0, or it never stops.[/red]")
         raise typer.Exit(1)
     found = project_broker()
     target = Broker(
@@ -246,34 +302,94 @@ def start_cmd(
         connection=connection,
         qos=qos,
         retain=retain,
+        replay=Replay(str(replay), speed, loop) if replay else None,
         rebuild=rebuild,
     )
     if rc != 0:
         raise typer.Exit(rc)
 
 
+def _measurement(name: str, kind: Wave | Feed | None) -> str:
+    if isinstance(kind, Feed):
+        if kind.kind == "image":
+            shape = f"{kind.width}×{kind.height}×{kind.channels}"
+        else:
+            source = Path(kind.file).name if kind.file else f"{kind.frequency:g} Hz"
+            shape = f"{kind.window:g}s at {kind.sample_rate} Hz, {source}"
+        warn = " [yellow](over the runner's MAX_FEATURES)[/yellow]" if (
+            kind.features > RUNNER_MAX_FEATURES) else ""
+        return f"{name} ({kind.kind} {shape}, {kind.features} values){warn}"
+    return name
+
+
+def _schedule(scenario: Scenario, d) -> str:
+    if d.mcu is None:
+        return f"{scenario.interval_of(d):g}s"
+    if d.mcu.sleep is not None:
+        return f"wakes every {d.mcu.sleep:g}s"
+    return f"{scenario.interval_of(d):g}s, always on"
+
+
+def _mcu(d) -> str:
+    if d.mcu is None:
+        return "—"
+    m = d.mcu
+    parts = [f"{m.type} {m.firmware}", f"boot {m.boot:g}s"]
+    if m.drop_probability:
+        parts.append(f"Wi-Fi drops {m.drop_probability:g} for {m.drop_duration:g}s")
+    if m.buffer:
+        parts.append(f"buffers {m.buffer}")
+    return ", ".join(parts)
+
+
 @app.command("check")
 def check_cmd(
     scenario: Path = typer.Argument(..., help="Scenario file to check."),
 ) -> None:
-    """Check a scenario file and list the devices it simulates."""
+    """Check a scenario file (or a recording to replay) and list what it publishes."""
     try:
-        loaded = load_scenario(scenario)
+        if scenario.suffix.lower() in (".csv", ".tsv"):
+            loaded = Scenario(devices=(), replays=(Replay(str(scenario)),))
+        else:
+            loaded = load_scenario(scenario)
+        recordings = [(r, replays.load(r.file)) for r in loaded.replays]
     except ScenarioError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1) from e
 
-    table = Table(title=f"Scenario: {scenario}", show_lines=False)
-    table.add_column("Device")
-    table.add_column("Every")
-    table.add_column("Measurements")
-    table.add_column("Faults")
-    for d in loaded.devices:
-        faults = ", ".join(
-            f"{f.type}" + (f" ({f.measurement})" if f.measurement else "") for f in d.faults
-        )
-        table.add_row(d.id, f"{loaded.interval_of(d):g}s", ", ".join(d.measurements), faults or "—")
-    console.print(table)
+    if loaded.devices:
+        table = Table(title=f"Scenario: {scenario}", show_lines=False)
+        table.add_column("Device")
+        table.add_column("Every")
+        table.add_column("Measurements")
+        table.add_column("Faults")
+        mcus = any(d.mcu for d in loaded.devices)
+        if mcus:
+            table.add_column("Firmware-like")
+        for d in loaded.devices:
+            faults = ", ".join(
+                f"{f.type}" + (f" ({f.measurement})" if f.measurement else "") for f in d.faults
+            )
+            row = [d.id, _schedule(loaded, d),
+                   ", ".join(_measurement(n, k) for n, k in d.measurements.items()),
+                   faults or "—"]
+            table.add_row(*row, *([_mcu(d)] if mcus else []))
+        console.print(table)
+    if recordings:
+        table = Table(title="Replays", show_lines=False)
+        table.add_column("File")
+        table.add_column("Format")
+        table.add_column("Readings")
+        table.add_column("Devices")
+        table.add_column("Recorded over")
+        table.add_column("Speed")
+        for r, rec in recordings:
+            renamed = [f"{d}→{r.devices[d]}" if d in r.devices else d for d in rec.devices]
+            fmt = rec.format + (f" ({rec.skipped} other rows skipped)" if rec.skipped else "")
+            speed = "as fast as it can" if r.speed == 0 else f"×{r.speed:g}"
+            table.add_row(Path(r.file).name, fmt, str(len(rec.records)), ", ".join(renamed),
+                          f"{rec.span:g}s", speed + (", looped" if r.loop else ""))
+        console.print(table)
     flags = [f"QoS {loaded.qos}"]
     if loaded.retain:
         flags.append("retained")

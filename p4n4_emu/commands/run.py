@@ -12,8 +12,10 @@ import typer
 from rich.console import Console
 
 import p4n4_emu
+from p4n4_emu.hw import layout
 from p4n4_emu.hw.mqtt_bridge import parse_address
 from p4n4_emu.hw.readings import DEFAULT_DEVICE, Readings
+from p4n4_emu.hw.shims import GPIOD_APIS
 from p4n4_emu.profiles.loader import list_profiles, load_profile
 from p4n4_emu.sim.scenario import ScenarioError
 
@@ -36,7 +38,9 @@ def cmd(
     ],
     profile: Annotated[
         str,
-        typer.Option("--profile", "-p", help="Hardware profile: its board (rpi4, rpi5)."),
+        typer.Option(
+            "--profile", "-p", help="Hardware profile: its board (rpi3, rpi4, rpi5, rpi-zero2w)."
+        ),
     ] = "rpi5",
     device: Annotated[
         str | None,
@@ -62,12 +66,29 @@ def cmd(
     gpio_prefix: Annotated[
         str, typer.Option("--gpio-prefix", help="Topic prefix of the GPIO control channel.")
     ] = "emu/gpio",
+    hardware: Annotated[
+        Path | None,
+        typer.Option(
+            "--hardware",
+            help="Board layout: which parts sit on which bus and address, and which "
+            "measurements feed them (default: a BME280, MPU-6050 and ADS1115 on I2C 1, "
+            "an MCP3008 on SPI 0.0, a DS18B20 on 1-Wire).",
+        ),
+    ] = None,
     no_parts: Annotated[
         bool,
         typer.Option(
             "--no-parts", help="Leave the buses empty (no BME280, MPU-6050, ADS1115, ...)."
         ),
     ] = False,
+    gpiod: Annotated[
+        str,
+        typer.Option(
+            "--gpiod",
+            help="What `import gpiod` gives: v2 (libgpiod 2) or v1 (python3-libgpiod 1.6, "
+            "Raspberry Pi OS bookworm's package).",
+        ),
+    ] = "v2",
     python: Annotated[
         str | None,
         typer.Option(
@@ -86,11 +107,22 @@ def cmd(
     if profile not in list_profiles():
         console.print(f"[red]Unknown profile {profile!r}.[/red] Available: {list_profiles()}")
         raise typer.Exit(2)
-    board = load_profile(profile).board
+    try:
+        prof = load_profile(profile)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(2) from None
+    if hardware is not None and no_parts:
+        console.print("[red]--hardware and --no-parts are mutually exclusive.[/red]")
+        raise typer.Exit(2)
+    if gpiod not in GPIOD_APIS:
+        console.print(f"[red]--gpiod: expected one of {', '.join(GPIOD_APIS)}.[/red]")
+        raise typer.Exit(2)
+    board = prof.board
     if board is None:
         console.print(
             f"[red]Profile {profile!r} has no GPIO header to emulate.[/red] "
-            "Use a Raspberry Pi profile (rpi4, rpi5)."
+            "Use a Raspberry Pi profile (rpi3, rpi4, rpi5, rpi-zero2w)."
         )
         raise typer.Exit(2)
     # Check what the script's interpreter would fail on, where the error is readable
@@ -99,6 +131,10 @@ def cmd(
             readings = Readings.from_scenario(scenario, device)
         else:
             readings = Readings(device or DEFAULT_DEVICE)
+        parts = None
+        if hardware is not None:
+            parts = layout.load(hardware)
+            layout.check_measurements(parts, readings)
         if gpio_mqtt:
             parse_address(gpio_mqtt)
     except (ScenarioError, ValueError) as e:
@@ -114,7 +150,8 @@ def cmd(
         readings=readings,
         gpio_mqtt=gpio_mqtt,
         gpio_prefix=gpio_prefix,
-        parts=not no_parts,
+        parts=parts if parts is not None else not no_parts,
+        gpiod=gpiod,
     )
     # The script takes over this process: signals and the exit status are its own
     os.execvpe(interpreter, [interpreter, script, *ctx.args], env)
@@ -126,7 +163,8 @@ def run_env(
     readings: Readings,
     gpio_mqtt: str | None,
     gpio_prefix: str,
-    parts: bool,
+    parts: bool | tuple[layout.Part, ...],
+    gpiod: str = "v2",
 ) -> dict[str, str]:
     """The script's environment: the sitecustomize first on PYTHONPATH, and its settings."""
     env = dict(os.environ)
@@ -134,6 +172,11 @@ def run_env(
     env["P4N4_EMU_PATH"] = str(Path(p4n4_emu.__file__).resolve().parent.parent)
     env["P4N4_EMU_BOARD"] = board
     env["P4N4_EMU_PARTS"] = "1" if parts else "0"
+    if isinstance(parts, tuple):
+        env["P4N4_EMU_HARDWARE"] = layout.to_json(parts)
+    else:
+        env.pop("P4N4_EMU_HARDWARE", None)
+    env["P4N4_EMU_GPIOD"] = gpiod
     env["P4N4_EMU_GPIO_PREFIX"] = gpio_prefix
     # The device's waves, so the script's interpreter needn't read the scenario's YAML
     env["P4N4_EMU_READINGS"] = readings.to_json()

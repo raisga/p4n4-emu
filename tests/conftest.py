@@ -27,6 +27,14 @@ def compose_available() -> bool:
     return r.returncode == 0
 
 
+@pytest.fixture(autouse=True)
+def _no_user_profiles(monkeypatch, tmp_path_factory):
+    """Profiles in the developer's ~/.p4n4-emu/profiles stay out of the tests."""
+    from p4n4_emu.profiles import loader
+
+    monkeypatch.setattr(loader, "USER_DIR", tmp_path_factory.mktemp("home") / "profiles")
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--run-integration",

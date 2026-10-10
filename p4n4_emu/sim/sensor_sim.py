@@ -14,6 +14,11 @@ Environment variables:
     MQTT_KEY_FILE      Its private key
     SIM_SCENARIO       Scenario file (see scenario.py); without one, every device
                        publishes every built-in measurement
+    SIM_FILES          JSON map of the files the scenario names (as written) to where
+                       they are mounted; `sim start` sets it
+    SIM_REPLAY         A recording to replay (see replay.py), besides the scenario's
+    SIM_REPLAY_SPEED   Its speed (default 1; 0 publishes as fast as it can)
+    SIM_REPLAY_LOOP    1 to start it over at the end
     SIM_INTERVAL_SEC   Publish interval in seconds (default: 2.0, or the scenario's)
     SIM_DEVICE_COUNT   Number of simulated sensor devices without a scenario (default: 1)
     SIM_QOS            MQTT QoS of every publish (default: 0, or the scenario's)
@@ -23,6 +28,7 @@ Environment variables:
 from __future__ import annotations
 
 import heapq
+import json
 import logging
 import os
 import random
@@ -35,9 +41,19 @@ from dataclasses import dataclass, replace
 
 import paho.mqtt.client as mqtt
 
-from p4n4_emu.sim import generators
+from p4n4_emu.sim import generators, media
 from p4n4_emu.sim.faults import FaultInjector
-from p4n4_emu.sim.scenario import Device, Scenario, default_scenario, load_scenario
+from p4n4_emu.sim.mcu import McuNode
+from p4n4_emu.sim.replay import Replayer
+from p4n4_emu.sim.scenario import (
+    Device,
+    Feed,
+    Replay,
+    Scenario,
+    Wave,
+    default_scenario,
+    load_scenario,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -98,6 +114,10 @@ class DeviceSim:
                 self.gens[name] = zip(
                     generators.accelerometer_xyz(), generators.cpu_load_pct(phase=phase)
                 )
+            elif isinstance(wave, Feed):
+                # Its own generator, so a feed's noise doesn't shift when faults fire
+                noise = random.Random(f"{scenario.seed}/{device.id}/{name}")
+                self.gens[name] = media.feed(wave, noise, phase)
             else:
                 self.gens[name] = generators.wave(wave, phase=phase)
         self.faults = FaultInjector(device.faults, rng, start)
@@ -111,9 +131,12 @@ class DeviceSim:
             sample = next(gen)  # sampled even when dropped, so the curve stays on time
             if self.faults.dropped(name, now):
                 continue
-            if self.device.measurements[name] is None:
+            kind = self.device.measurements[name]
+            if kind is None:
                 accel, cpu = sample
                 payload: dict = {"values": list(accel), "cpu_pct": cpu}
+            elif not isinstance(kind, Wave):
+                payload = {"values": sample}
             else:
                 payload = {
                     "value": self.faults.value(name, sample, now),
@@ -149,22 +172,36 @@ def resolve_scenario(
     devices: int | None = None,
     qos: int | None = None,
     retain: bool | None = None,
+    replay: Replay | None = None,
 ) -> Scenario:
     """The scenario to run, with the arguments, then the environment, overriding it.
 
     Settings left as None come from the environment variables in the module
-    docstring, read when this is called.
+    docstring, read when this is called. *replay* (or SIM_REPLAY) is replayed besides
+    the scenario's own; with neither a scenario nor a device count, it is all that runs.
     """
+    if replay is None and os.getenv("SIM_REPLAY"):
+        replay = Replay(
+            os.environ["SIM_REPLAY"],
+            float(os.getenv("SIM_REPLAY_SPEED") or 1.0),
+            _env_flag("SIM_REPLAY_LOOP"),
+        )
     if scenario is None:
         scenario = os.getenv("SIM_SCENARIO") or None
     if isinstance(scenario, str):
-        scenario = load_scenario(scenario)
+        files = json.loads(os.environ["SIM_FILES"]) if os.getenv("SIM_FILES") else None
+        scenario = load_scenario(scenario, files)
     if interval is None and os.getenv("SIM_INTERVAL_SEC"):
         interval = float(os.environ["SIM_INTERVAL_SEC"])
     if scenario is None:
-        if devices is None:
-            devices = int(os.getenv("SIM_DEVICE_COUNT", "1"))
-        scenario = default_scenario(devices)
+        if devices is None and replay is not None and not os.getenv("SIM_DEVICE_COUNT"):
+            scenario = Scenario(devices=())
+        else:
+            if devices is None:
+                devices = int(os.getenv("SIM_DEVICE_COUNT", "1"))
+            scenario = default_scenario(devices)
+    if replay is not None:
+        scenario = replace(scenario, replays=(*scenario.replays, replay))
     if qos is None and os.getenv("SIM_QOS"):
         qos = int(os.environ["SIM_QOS"])
     if retain is None and os.getenv("SIM_RETAIN"):
@@ -184,6 +221,7 @@ def run(
     qos: int | None = None,
     retain: bool | None = None,
     clock: Callable[[], float] = time.time,
+    replay: Replay | None = None,
 ) -> None:
     """Publish readings on the scenario's schedule until *stop* is set or SIGTERM/SIGINT.
 
@@ -198,7 +236,7 @@ def run(
         auth = BrokerAuth.from_env()
     if port is None:
         port = int(os.getenv("MQTT_PORT") or (8883 if auth.tls else 1883))
-    scenario = resolve_scenario(scenario, interval, devices, qos, retain)
+    scenario = resolve_scenario(scenario, interval, devices, qos, retain, replay)
     stop = stop or threading.Event()
 
     # `docker stop` sends SIGTERM to PID 1, which ignores it without a handler
@@ -206,32 +244,59 @@ def run(
     if in_main_thread:
         previous_handler = signal.signal(signal.SIGTERM, lambda *_: stop.set())
 
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    client.on_connect = _on_connect
-    client.on_connect_fail = _on_connect_fail
-    client.on_disconnect = _on_disconnect
-    client.reconnect_delay_set(RECONNECT_MIN_DELAY, RECONNECT_MAX_DELAY)
-    auth.apply(client)
-    # The network loop retries the first connection too, so a broker that is
-    # still starting (or restarting) doesn't end the simulator. QoS 0 readings
-    # taken while disconnected are dropped, as a QoS 0 device would drop them.
-    client.connect_async(host, port, keepalive=60)
-    client.loop_start()
+    def new_client(client_id: str | None = None) -> mqtt.Client:
+        if client_id is None:
+            c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        else:  # a firmware-like device: its own id, and MQTT 5 to drop with its will
+            c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id,
+                            protocol=mqtt.MQTTv5)
+        c.on_connect = _on_connect
+        c.on_connect_fail = _on_connect_fail
+        c.on_disconnect = _on_disconnect
+        c.reconnect_delay_set(RECONNECT_MIN_DELAY, RECONNECT_MAX_DELAY)
+        auth.apply(c)
+        return c
+
+    def connect(c: mqtt.Client) -> None:
+        # The network loop retries the first connection too, so a broker that is
+        # still starting (or restarting) doesn't end the simulator. QoS 0 readings
+        # taken while disconnected are dropped, as a QoS 0 device would drop them.
+        c.connect_async(host, port, keepalive=60)
+        c.loop_start()
+
+    client = new_client()
+    connect(client)
 
     start = clock()
     rng = random.Random(scenario.seed)
     sims = [DeviceSim(d, scenario, rng, start) for d in scenario.devices]
+    nodes = [
+        McuNode(sim.device.id, sim.device.mcu, sim.interval, sim.readings, new_client, connect,
+                rng, start, scenario.qos, scenario.retain)
+        for sim in sims if sim.device.mcu is not None
+    ]
+    replayers = [Replayer(r, start) for r in scenario.replays]
     # (when, sequence, …): the sequence keeps equal times in order and never compares further
-    due = [(start, i, sim) for i, sim in enumerate(sims)]
-    held: list[tuple[float, int, str, str]] = []  # delayed readings: (when, seq, topic, payload)
+    due = [(start, i, sim) for i, sim in enumerate(sims) if sim.device.mcu is None]
+    heapq.heapify(due)
+    # Delayed readings: (when, seq, publish, topic, payload)
+    held: list[tuple[float, int, Callable[[str, str], None], str, str]] = []
     seq = len(sims)
 
     def publish(topic: str, payload: str) -> None:
         client.publish(topic, payload, qos=scenario.qos, retain=scenario.retain)
 
+    def hold(now: float, late, publisher) -> None:
+        nonlocal seq
+        for delay, topic, payload in late:
+            seq += 1
+            heapq.heappush(held, (now + delay, seq, publisher, topic, payload))
+
     _log.info(
-        "Sensor sim started: %d device(s) → %s:%d%s every %.1fs (QoS %d%s)",
-        len(sims), host, port, " over TLS" if auth.tls else "", scenario.interval,
+        "Sensor sim started: %d device(s)%s%s → %s:%d%s every %.1fs (QoS %d%s)",
+        len(sims), f", {len(nodes)} firmware-like" if nodes else "",
+        f", {len(replayers)} replay(s)" if replayers else "",
+        host, port, " over TLS" if auth.tls else "", scenario.interval,
         scenario.qos, ", retained" if scenario.retain else "",
     )
     try:
@@ -239,21 +304,38 @@ def run(
             now = clock()
             while due and due[0][0] <= now:
                 _, i, sim = heapq.heappop(due)
+                late = []
                 for delay, topic, payload in sim.readings(now):
                     if delay > 0:
-                        seq += 1
-                        heapq.heappush(held, (now + delay, seq, topic, payload))
+                        late.append((delay, topic, payload))
                     else:
                         publish(topic, payload)
+                hold(now, late, publish)
                 heapq.heappush(due, (now + sim.interval, i, sim))
+            for node in nodes:
+                if node.due <= now:
+                    hold(now, node.tick(now), node.publish)
+            for replayer in replayers:
+                for topic, payload in replayer.pop_due(now, scenario.timestamp):
+                    publish(topic, payload)
             while held and held[0][0] <= now:
-                _, _, topic, payload = heapq.heappop(held)
-                publish(topic, payload)
-            wake = min(due[0][0], held[0][0]) if held else due[0][0]
-            stop.wait(max(0.0, wake - clock()))
+                _, _, publisher, topic, payload = heapq.heappop(held)
+                publisher(topic, payload)
+            times = [t for t in (
+                due[0][0] if due else None,
+                held[0][0] if held else None,
+                *(n.due for n in nodes),
+                *(r.next_due for r in replayers),
+            ) if t is not None]
+            if not times:
+                _log.info("Every replay has ended.")
+                break
+            stop.wait(max(0.0, min(times) - clock()))
     except KeyboardInterrupt:
         pass
     finally:
+        for node in nodes:
+            node.stop()
         client.loop_stop()
         client.disconnect()
         if in_main_thread:

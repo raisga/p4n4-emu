@@ -3,7 +3,8 @@
 smbus2 / smbus, spidev, pyserial and lgpio's i2c_* / spi_* are front ends over
 these buses. A part is a device model (p4n4_emu.hw.devices) at an address; an
 address with nothing attached answers like real hardware does: an I2C transfer
-fails with EREMOTEIO, SPI reads back zeros, and a UART read times out.
+fails with EREMOTEIO, SPI reads back zeros, and a UART read times out. A part
+whose readings drop out (a scenario's dropout fault) answers the same way.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
+
+from p4n4_emu.hw.readings import SensorDropout
 
 
 class I2CDevice:
@@ -191,6 +194,11 @@ def check_i2c_bus(bus: int) -> None:
             raise _missing(f"/dev/i2c-{bus}")
 
 
+def _nack() -> OSError:
+    """What i2c-dev reports when no part acknowledges the address."""
+    return OSError(errno.EREMOTEIO, os.strerror(errno.EREMOTEIO))
+
+
 class I2CClient:
     """SMBus and plain I2C transfers to one address, as the kernel's i2c-dev does them."""
 
@@ -203,17 +211,22 @@ class I2CClient:
         with _lock:
             device = _i2c.get(self.bus, {}).get(self.address)
         if device is None:
-            # What i2c-dev reports when no part acknowledges the address
-            raise OSError(errno.EREMOTEIO, os.strerror(errno.EREMOTEIO))
+            raise _nack()
         return device
 
     def write(self, data: bytes) -> None:
         with _lock:
-            self._device().write(bytes(data))
+            try:
+                self._device().write(bytes(data))
+            except SensorDropout:
+                raise _nack() from None
 
     def read(self, count: int) -> bytes:
         with _lock:
-            return self._device().read(count)
+            try:
+                return self._device().read(count)
+            except SensorDropout:
+                raise _nack() from None
 
     def quick(self) -> None:
         self._device()
@@ -287,7 +300,10 @@ def spi_transfer(bus: int, chip_select: int, data: bytes) -> bytes:
         device = _spi[(bus, chip_select)]
         if device is None:
             return bytes(len(data))
-        return device.transfer(bytes(data))
+        try:
+            return device.transfer(bytes(data))
+        except SensorDropout:
+            return bytes(len(data))
 
 
 def spi_devices() -> dict[tuple[int, int], SPIDevice | None]:

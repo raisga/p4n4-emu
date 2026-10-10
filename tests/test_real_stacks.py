@@ -86,3 +86,29 @@ def test_overlay_merges_with_the_real_stack(stack, profile, tmp_path):
         assert read["Path"] == _DEVICE and int(read["Rate"]) == want.read_bps, name
         # The overlay must not change what the stack runs
         assert svc.get("image") or svc.get("build"), name
+
+
+@pytest.mark.parametrize("stack", sorted(s for s in STACKS if s in ("ai", "edge")))
+def test_gpu_reservations_merge_with_the_real_stack(stack, tmp_path):
+    stack_dir = STACKS[stack]
+    services = _services(stack_dir)
+    rendered = render_overlay(
+        load_profile("jetson-orin-nano"), stack, None, services=services, platform=None,
+        gpu="nvidia",
+    )
+    overlay = tmp_path / f"{stack}.emu.yml"
+    overlay.write_text(rendered)
+    r = subprocess.run(
+        [*_compose(stack_dir, overlay), "config", "--format", "json"],
+        capture_output=True, text=True, check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    merged = json.loads(r.stdout)["services"]
+    gpu_users = {"ollama", "ei-runner"} & set(merged)
+    assert gpu_users
+    for name, svc in merged.items():
+        devices = svc["deploy"]["resources"].get("reservations", {}).get("devices")
+        if name in gpu_users:
+            assert devices == [{"driver": "nvidia", "count": 1, "capabilities": ["gpu"]}], name
+        else:
+            assert not devices, name

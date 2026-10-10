@@ -106,9 +106,21 @@ def test_up_sim_uses_shared_start_with_options(stack_dir, preflight_calls, monke
     )
     assert result.exit_code == 0, result.output
     assert calls == [
-        {"interval": 0.5, "devices": 3, "scenario": None,
+        {"interval": 0.5, "devices": 3, "scenario": None, "replay": None,
          "broker": stack_config.DEFAULT_BROKER_INFO}
     ]
+
+
+def test_up_sim_replay(stack_dir, preflight_calls, monkeypatch):
+    from p4n4_emu.sim.scenario import Replay
+
+    calls = []
+    monkeypatch.setattr(up, "start_simulator", lambda **kw: calls.append(kw) or 0)
+    result = runner.invoke(
+        app, ["up", "--native", "--stack-dir", str(stack_dir), "--sim", "--sim-replay", "r.csv"],
+    )
+    assert result.exit_code == 0, result.output
+    assert calls[0]["replay"] == Replay("r.csv")
 
 
 def test_up_sim_scenario_leaves_interval_and_devices_to_it(
@@ -800,3 +812,135 @@ def test_down_yes_skips_the_volume_prompt(down_calls, tmp_path, monkeypatch):
     result = runner.invoke(app, ["down", "--stack", "iot", "--volumes", "--yes"])
     assert result.exit_code == 0, result.output
     assert used == [True]
+
+
+# ── up with a GPU profile ─────────────────────────────────────────────────────
+
+@pytest.fixture
+def ai_stack(stack_dir, monkeypatch):
+    monkeypatch.setattr(up.dc, "list_services", lambda cwd: ["ollama", "letta"])
+    return stack_dir
+
+
+def _ai_overlay(stack_dir):
+    return yaml.safe_load(paths.overlay_path(stack_dir, "ai").read_text())
+
+
+def _host(runtimes):
+    from p4n4_emu.utils.docker_host import DockerHost
+
+    return DockerHost("29.4.1", "2", "systemd", "Ubuntu 24.04", runtimes)
+
+
+def test_up_gpu_profile_reserves_the_gpu_for_gpu_services(ai_stack, preflight_calls, monkeypatch):
+    monkeypatch.setattr(up, "docker_host", lambda: _host(("nvidia", "runc")))
+    result = runner.invoke(
+        app, ["up", "-p", "jetson-orin-nano", "--native", "-s", "ai", "--stack-dir", str(ai_stack)]
+    )
+    assert result.exit_code == 0, result.output
+    doc = _ai_overlay(ai_stack)
+    assert doc["x-p4n4-emu"]["gpu"] == "nvidia"
+    devices = doc["services"]["ollama"]["deploy"]["resources"]["reservations"]["devices"]
+    assert devices == [{"driver": "nvidia", "count": 1, "capabilities": ["gpu"]}]
+    assert "reservations" not in doc["services"]["letta"]["deploy"]["resources"]
+
+
+@pytest.mark.parametrize(
+    ("argv", "runtimes", "reason"),
+    [
+        (["--native"], ("runc",), "no NVIDIA runtime"),
+        ([], ("nvidia", "runc"), "QEMU"),  # arm64 images on an x86 host
+        (["--native", "--no-gpu"], ("nvidia", "runc"), "--no-gpu"),
+    ],
+)
+def test_up_gpu_profile_falls_back_to_the_cpu(
+    ai_stack, preflight_calls, monkeypatch, argv, runtimes, reason
+):
+    monkeypatch.setattr(up, "docker_host", lambda: _host(runtimes))
+    result = runner.invoke(
+        app, ["up", "-p", "jetson-orin-nano", *argv, "-s", "ai", "--stack-dir", str(ai_stack)]
+    )
+    assert result.exit_code == 0, result.output
+    assert reason in result.output
+    assert "CPU only" in result.output
+    doc = _ai_overlay(ai_stack)
+    assert "gpu" not in doc["x-p4n4-emu"]
+    assert "reservations" not in doc["services"]["ollama"]["deploy"]["resources"]
+
+
+def test_up_profile_without_gpu_never_asks_docker(ai_stack, preflight_calls, monkeypatch):
+    monkeypatch.setattr(up, "docker_host", lambda: pytest.fail("asked docker info"))
+    result = runner.invoke(app, ["up", "-p", "rpi5", "-s", "ai", "--stack-dir", str(ai_stack)])
+    assert result.exit_code == 0, result.output
+
+
+# ── profile list / validate, user and project profiles ────────────────────────
+
+GOOD_PROFILE = """\
+description: "Custom board"
+arch: arm64
+cpus: 2
+memory: 1g
+blkio_read_bps: 20m
+blkio_write_bps: 10m
+"""
+
+
+def test_profile_list_shows_user_and_project_profiles(tmp_path, monkeypatch):
+    from p4n4_emu.profiles import loader
+
+    monkeypatch.setattr(loader, "USER_DIR", tmp_path / "home")
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / "mine.yml").write_text(GOOD_PROFILE)
+    project = tmp_path / "proj"
+    (project / ".p4n4-emu" / "profiles").mkdir(parents=True)
+    (project / ".p4n4.json").write_text('{"layers": ["iot"]}')
+    (project / ".p4n4-emu" / "profiles" / "rpi5.yml").write_text(
+        GOOD_PROFILE.replace("Custom board", "Project's own rpi5")
+    )
+    monkeypatch.chdir(project)
+    result = runner.invoke(app, ["profile", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    import json
+
+    rows = {p["name"]: p for p in json.loads(result.output)}
+    assert rows["mine"]["from"] == "user"
+    assert rows["rpi5"]["from"] == "project"
+    assert rows["rpi5"]["description"] == "Project's own rpi5"
+    assert rows["rpi4"]["from"] == "built-in"
+
+
+def test_profile_list_skips_an_invalid_profile(tmp_path, monkeypatch):
+    from p4n4_emu.profiles import loader
+
+    monkeypatch.setattr(loader, "USER_DIR", tmp_path)
+    (tmp_path / "broken.yml").write_text("description: x\ncpus: 2\n")
+    result = runner.invoke(app, ["profile", "list"])
+    assert result.exit_code == 0, result.output
+    assert "Skipping an invalid profile" in result.output
+    assert "rpi5" in result.output
+
+
+def test_profile_validate(tmp_path):
+    good, bad = tmp_path / "good.yml", tmp_path / "bad.yml"
+    good.write_text(GOOD_PROFILE)
+    bad.write_text(GOOD_PROFILE + "cpu_count: 4\n")
+    result = runner.invoke(app, ["profile", "validate", str(good)])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["profile", "validate", str(good), str(bad)])
+    assert result.exit_code == 1
+    assert "unknown key(s) cpu_count" in result.output
+
+
+def test_profile_validate_everything_by_default():
+    result = runner.invoke(app, ["profile", "validate", "--json"])
+    assert result.exit_code == 0, result.output
+    import json
+
+    assert {Path(r["file"]).stem for r in json.loads(result.output)} >= {"rpi5", "rpi3"}
+
+
+def test_profile_validate_by_name():
+    result = runner.invoke(app, ["profile", "validate", "rpi-zero2w"])
+    assert result.exit_code == 0, result.output
+    assert "rpi-zero2w.yml" in result.output

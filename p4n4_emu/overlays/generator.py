@@ -49,6 +49,9 @@ SERVICE_SHARES: dict[str, dict[str, Share]] = {
 }
 FALLBACK_SHARE = Share(0.10, 0.10)
 
+# Services that use a GPU when the profile has one: LLM inference and the edge runner
+GPU_SERVICES = frozenset({"ollama", "ei-runner"})
+
 _DOCKER_PLATFORMS = {
     "arm64": "linux/arm64",
     "aarch64": "linux/arm64",
@@ -106,6 +109,7 @@ def render_overlay(
     services: Iterable[str] | None = None,
     platform: str | None = "auto",
     scale: Scale | None = None,
+    gpu: str | None = None,
 ) -> str:
     """Render a Compose override YAML string for *stack* using *profile*.
 
@@ -117,6 +121,7 @@ def render_overlay(
         platform: Docker platform to force, None for native, "auto" for the profile's
             own architecture when it is ARM
         scale: per-device budget scale from budget_scale()
+        gpu: GPU driver (e.g. "nvidia") whose device GPU_SERVICES reserve, or None
     """
     if platform == "auto":
         platform = docker_platform(profile.arch) if profile.is_arm else None
@@ -132,6 +137,7 @@ def render_overlay(
                 "cpus": f"{max(_MIN_CPUS, profile.cpus * share.cpu * scale.cpu):.2f}",
                 "memory_mb": memory_mb,
                 "memswap_mb": max(memory_mb, int(memory_mb * swap_ratio)),
+                "gpu": gpu if name in GPU_SERVICES else None,
             }
         )
 
@@ -148,4 +154,5 @@ def render_overlay(
         services=rendered_services,
         platform=platform,
         blkio_device=blkio_device,
+        gpu=gpu,
     )

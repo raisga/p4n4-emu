@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _FIELDS = ("ServerVersion", "CgroupVersion", "CgroupDriver", "OperatingSystem")
+# The runtimes' names, comma-separated, after the fields
+_RUNTIMES = "{{range $name, $_ := .Runtimes}}{{$name}},{{end}}"
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,12 @@ class DockerHost:
     cgroup_version: str  # "1" or "2"
     cgroup_driver: str  # "systemd", "cgroupfs", or "none" (no limits, e.g. rootless)
     os: str
+    runtimes: tuple[str, ...] = ()
+
+    @property
+    def nvidia(self) -> bool:
+        """The NVIDIA container runtime is set up, so containers can reserve the GPU."""
+        return "nvidia" in self.runtimes
 
     @property
     def desktop(self) -> bool:
@@ -29,7 +37,7 @@ class DockerHost:
 
 def docker_host() -> DockerHost | None:
     """The engine's `docker info`, or None when Docker is missing or not running."""
-    fmt = "|".join(f"{{{{.{f}}}}}" for f in _FIELDS)
+    fmt = "|".join([*(f"{{{{.{f}}}}}" for f in _FIELDS), _RUNTIMES])
     try:
         r = subprocess.run(
             ["docker", "info", "--format", fmt], capture_output=True, text=True, check=False
@@ -37,9 +45,10 @@ def docker_host() -> DockerHost | None:
     except FileNotFoundError:
         return None
     parts = r.stdout.strip().split("|")
-    if r.returncode != 0 or len(parts) != len(_FIELDS) or not parts[0]:
+    if r.returncode != 0 or len(parts) != len(_FIELDS) + 1 or not parts[0]:
         return None
-    return DockerHost(*parts)
+    *fields, runtimes = parts
+    return DockerHost(*fields, runtimes=tuple(sorted(n for n in runtimes.split(",") if n)))
 
 
 def cgroup_v2(host: DockerHost | None = None) -> bool:

@@ -123,18 +123,33 @@ Line numbers below refer to the code before the fix.
 - [ ] Simulate **clock skew / missing RTC** (Pi boots without network time) using libfaketime
       for chosen services.
 
-## 3. New hardware profiles (P1)
+## 3. New hardware profiles (P1) — done 2026-10-10, accelerators deferred
 
-- [ ] `rpi3` / `rpi-zero2w` (armv7 or arm64, 1 GB / 512 MB).
-- [ ] `jetson-orin-nano`: GPU passthrough (`deploy.resources.reservations.devices`), and a
-      degraded CPU-only mode on hosts without NVIDIA.
-- [ ] Accelerator profiles for the edge runner (Coral, Hailo): stub device plus a latency model.
-- [ ] Rename or document `mcu-class`. It is a 256 MB x86 Linux container, not an MCU.
-      Real MCU nodes belong under section 5.
-- [ ] User-defined profiles in `~/.p4n4-emu/profiles/*.yml` and inside the project, with a
-      schema check (unknown keys, invalid sizes) and a `profile validate` command.
+- [x] `rpi3` (768 MB) and `rpi-zero2w` (384 MB), arm64 like 64-bit Raspberry Pi OS; their
+      boards (revision codes `a02082` / `902120`, `pinctrl-bcm2835`) for `p4n4-emu run`,
+      which gpiozero's `pi_info()` recognises. `--arch armv7` gives the 32-bit OS, but few
+      stack images publish armv7 (InfluxDB 2 doesn't).
+- [x] `jetson-orin-nano` (6 cores, 7 GB, NVMe): `gpu: nvidia` in the profile makes `ollama`
+      and `ei-runner` reserve one GPU (`deploy.resources.reservations.devices`). `up` falls
+      back to CPU only, with a warning, when Docker has no NVIDIA runtime, when the images
+      run under QEMU (an x86 host's GPU is useless to arm64 images: use `--native`), or
+      with `--no-gpu`. `profile switch` can't add or drop reservations (next `up` does).
+      Checked with `docker compose config` against the real ai and edge stacks.
+- [ ] Accelerator profiles for the edge runner (Coral, Hailo): stub device plus a latency
+      model. Deferred: `stacks/edge/runner` has no hook for one (backends are eim / onnx /
+      mock). Options: an env-driven latency model in the runner that the overlay sets, or
+      `tflite_runtime` / pycoral / `hailo_platform` stubs for `p4n4-emu run` scripts.
+- [x] Document `mcu-class` (kept the name): its description, the profile file and the
+      README say it's a 256 MB Linux container, not an MCU, and that the iot stack doesn't
+      fit. Real MCU nodes stay under section 5.
+- [x] User-defined profiles in `~/.p4n4-emu/profiles/*.yml` and a project's
+      `.p4n4-emu/profiles/` (a project's beat yours, yours beat the built-ins of the same
+      name), with a schema check: unknown or missing keys, sizes, `arch`, `board`, `gpu`,
+      `blkio_weight` range, swap below memory, a `name` that differs from the file. Errors
+      name the file and key. `profile validate [NAME|FILE ...]`; `profile list` shows where
+      each comes from and skips an invalid file with a warning.
 
-## 4. Hardware stubs (P1) — done 2026-10-10, two follow-ups open
+## 4. Hardware stubs (P1) — done 2026-10-10
 
 - [x] **`gpio_stub.setup` breaks real scripts.** It now takes the full `RPi.GPIO` signature
       (`pull_up_down=`, `initial=`, pin lists). `p4n4_button_handler.py` runs under the stub.
@@ -171,15 +186,28 @@ Line numbers below refer to the code before the fix.
       1-Wire sysfs, `/dev` nodes, served by `hw/vfs.py` inside the script's process only),
       then execs the interpreter (`--python` for the script's own virtualenv; the stubs
       need only the standard library). Any `sitecustomize` it shadows still runs.
-- [ ] Parts from a file: a `--hardware FILE` listing which parts sit on which bus /
-      address and which measurements feed them. Today the default board is fixed, and
-      other layouts need `buses.attach_*()` from Python.
-- [ ] Not stubbed yet: the `gpiod` v1 API (`chip.get_line()`, older Pi OS), `lgpio`'s
-      serial and notification calls, PWM as a toggling level (it records frequency and
-      duty cycle), `lgpio` watchdog alerts, and the faults of the simulator scenario
-      (spikes, stuck values) on the hardware path.
+- [x] Parts from a file: `run --hardware FILE` (`hw/layout.py`) lists the parts (bme280,
+      mpu6050, ads1115, mcp3008, ds18b20, a serial loopback) with their bus, address (only
+      the ones the real part straps to), chip select or port, and which device measurement
+      feeds each input (`measurements: {a0: soil_moisture}`). A bus a part names is created.
+      The default board is now the built-in layout. Errors name the entry and key.
+- [x] `gpiod` v1 API (python3-libgpiod 1.6, bookworm's package): `run --gpiod v1` makes
+      `import gpiod` load `hw/gpiod_v1_stub.py` (Chip by path / name / label / number,
+      Line, LineBulk, flags, edge events with a selectable fd). A flag, not one module with
+      both APIs, so scripts that detect the version still see the truth.
+- [x] `lgpio`: `serial_*` on the emulated ports (non-blocking, as lgpio opens them),
+      notification pipes (`notify_open` makes the `.lgd-nfy<h>` FIFO in `$LG_WD` or the
+      cwd, 16-byte reports; pause / resume / close), and watchdog alerts (one `TIMEOUT`
+      after an edge alert when no other edge follows in time, as lgpio does).
+- [x] PWM toggles: a read returns high for the duty cycle's part of each period (all
+      three GPIO libraries). Up to 10 Hz each toggle is also a change for watchers (edge
+      detection, `emu/gpio/<pin>/state`); faster PWM shows only in reads, so it can't
+      flood the broker. Stopping PWM leaves the pin low.
+- [x] Scenario faults on the hardware path: spike / stuck / drift change what parts read;
+      a dropout takes the part off the bus (I2C `OSError` 121, SPI zeros, DS18B20 CRC `NO`
+      and `EIO`). `delay` / `malformed` are MQTT-only and ignored there.
 
-## 5. Sensor simulator (P1)
+## 5. Sensor simulator (P1) — done 2026-10-10
 
 - [x] Configurable devices and measurements from a YAML scenario file (count, ids,
       measurement set, ranges, rates per device), replacing the four hardcoded measurements.
@@ -193,7 +221,13 @@ Line numbers below refer to the code before the fix.
       reading late, after newer ones; `timestamp: true` adds the `ts` it was taken at. The
       Node-RED flow stores readings at arrival time and ignores `ts`, so a late reading is
       only visible as out of order on the broker, not in InfluxDB.
-- [ ] Replay mode from a CSV / InfluxDB export.
+- [x] Replay mode from a CSV / InfluxDB export (`sim/replay.py`). Plain CSV
+      (`time,device,measurement,value[,unit][,…]`) or InfluxDB annotated CSV of the iot
+      flow's own schema (`sensor_data`, `device` / `sensor` tags; other measurements
+      skipped, rows of one reading merged). Recorded gaps divided by `speed` (0 = at once),
+      `loop`, device renames. Scenario `replay:` entries, or `sim start --replay FILE
+      --speed --loop` / `up --sim-replay`; `sim check FILE.csv` summarises a recording.
+      A simulator running only replays stops when they end.
 - [x] Broker auth and TLS (`MQTT_USERNAME` / `MQTT_PASSWORD` / CA). The iot stack ships
       `allow_anonymous true` today, but the hardened config and `acl.example` only let the device
       account write `sensors/iot-device-001/+`, so `emu-sensor-*` ids would be denied.
@@ -205,10 +239,22 @@ Line numbers below refer to the code before the fix.
 - [x] QoS / retain options for the simulator's publishes (scenario `qos` / `retain`,
       `sim start --qos` / `--retain`).
 - [x] Read `SIM_DEVICE_COUNT` (and the other settings) when `run()` is called, not at import.
-- [ ] Optional simulated **camera / audio feed** for the edge runner, so `ei-runner` can be tested
-      without a physical sensor.
-- [ ] MCU node emulation: a lightweight "virtual ESP32" container per device, or Renode / Wokwi
-      integration, that speaks the same MQTT contract as real firmware.
+- [x] Simulated **camera / audio feed** for the edge runner (`sim/media.py`): scenario
+      measurements with `kind: image` (a blob drifting over noise; `packed` RGB as Edge
+      Impulse takes it, `uint8` or `float`) or `kind: audio` (a tone plus noise, or windows
+      of a WAV file, stdlib `wave`), published as `{"values": [...]}`. `sim check` warns
+      above the runner's 65 536 `MAX_FEATURES`. Files a scenario names are mounted into the
+      container and mapped by name (`SIM_FILES`).
+- [x] MCU node emulation, as firmware-like devices in the simulator (`sim/mcu.py`), not a
+      container each: `mcu:` gives a device its own MQTT 5 connection (client id = device
+      id), registration on `devices/<id>/register` until the n8n onboarding flow confirms
+      on `devices/<id>/status`, retained `devices/<id>/availability` (online / sleeping /
+      `offline` will), boot time, deep-sleep cycles, Wi-Fi drops (disconnect with will)
+      and an offline buffer. Checked against Mosquitto: no reading lost around a
+      disconnect (paho closes the socket right after DISCONNECT, so the node waits for
+      the broker's acks first, or the kernel resets the connection and the broker drops
+      the last readings). Renode / Wokwi (real firmware binaries) not pursued: no
+      firmware exists in the repo. `availability` is p4n4-emu's topic; no stack reads it.
 
 ## 6. CLI and UX (P2)
 

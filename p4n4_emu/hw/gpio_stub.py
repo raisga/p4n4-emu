@@ -333,8 +333,8 @@ def wait_for_edge(
 
 
 class PWM:
-    """Software PWM on an output. The emulator records frequency and duty cycle
-    (pins.get(gpio).pwm, `emu/gpio/<pin>/pwm`); it doesn't toggle the level."""
+    """Software PWM on an output: the level toggles with the frequency and duty
+    cycle (see hw.pins), which are also in pins.get(gpio).pwm and `emu/gpio/<pin>/pwm`."""
 
     def __init__(self, channel: int, frequency: float) -> None:
         self._gpio = _to_gpio(channel)

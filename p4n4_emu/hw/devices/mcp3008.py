@@ -10,18 +10,28 @@ from __future__ import annotations
 
 from p4n4_emu.hw.buses import SPIDevice
 from p4n4_emu.hw.devices.ads1115 import DEFAULT_INPUTS
-from p4n4_emu.hw.readings import Readings
+from p4n4_emu.hw.readings import Readings, feeds
 
 VREF = 3.3
 
 
 class MCP3008(SPIDevice):
-    def __init__(self, readings: Readings | None = None, vref: float = VREF) -> None:
+    INPUTS = tuple(f"ch{n}" for n in range(8))
+
+    def __init__(
+        self,
+        readings: Readings | None = None,
+        vref: float = VREF,
+        measurements: dict[str, str] | None = None,
+    ) -> None:
         self.readings = readings or Readings()
         self.vref = vref
+        self.inputs = feeds(self.INPUTS, measurements)
 
     def voltage(self, channel: int) -> float:
-        return self.readings.value(f"ch{channel}", DEFAULT_INPUTS[channel % len(DEFAULT_INPUTS)])
+        return self.readings.value(
+            self.inputs[self.INPUTS[channel]], DEFAULT_INPUTS[channel % len(DEFAULT_INPUTS)]
+        )
 
     def code(self, single: bool, channel: int) -> int:
         if single:

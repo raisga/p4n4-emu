@@ -99,17 +99,23 @@ p4n4-emu profile list
 Expected output:
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                     Hardware profiles                            │
-├───────────┬───────┬────────────┬───────────────┬────────────────┤
-│ Name      │ CPUs  │ Memory     │ Disk R/W      │ Arch           │
-├───────────┼───────┼────────────┼───────────────┼────────────────┤
-│ rpi4      │ 4     │ 3584 MB    │ 50 MB/s       │ arm64          │
-│ rpi5      │ 4     │ 7168 MB    │ 100 MB/s      │ arm64          │
-│ nuc       │ 4     │ 14336 MB   │ 200 MB/s      │ x86_64         │
-│ mcu-class │ 1     │ 256 MB     │ 10 MB/s       │ x86_64         │
-└───────────┴───────┴────────────┴───────────────┴────────────────┘
+                                Available profiles
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┓
+┃ Name             ┃ Description                     ┃ Arch             ┃ CPU     ┃ Memory ┃ Disk R/W ┃ From     ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━┩
+│ jetson-orin-nano │ NVIDIA Jetson Orin Nano — 8 GB… │ arm64 + nvidia … │ 6 cores │ 7168m  │ 524 MB/s │ built-in │
+│ mcu-class        │ Ultra-constrained Linux — 1 co… │ x86_64           │ 1 core  │ 256m   │ 10 MB/s  │ built-in │
+│ nuc              │ Intel NUC — 4 cores / 16 GB (m… │ x86_64           │ 4 cores │ 14336m │ 209 MB/s │ built-in │
+│ rpi-zero2w       │ Raspberry Pi Zero 2 W — 512 MB  │ arm64            │ 4 cores │ 384m   │ 23 MB/s  │ built-in │
+│ rpi3             │ Raspberry Pi 3 Model B — 1 GB   │ arm64            │ 4 cores │ 768m   │ 23 MB/s  │ built-in │
+│ rpi4             │ Raspberry Pi 4 — 4 GB           │ arm64            │ 4 cores │ 3584m  │ 52 MB/s  │ built-in │
+│ rpi5             │ Raspberry Pi 5 — 8 GB           │ arm64            │ 4 cores │ 7168m  │ 104 MB/s │ built-in │
+└──────────────────┴─────────────────────────────────┴──────────────────┴─────────┴────────┴──────────┴──────────┘
 ```
+
+Profiles of your own go in `~/.p4n4-emu/profiles/<name>.yml` (or a project's
+`.p4n4-emu/profiles/`); `p4n4-emu profile validate` checks them. See the README's
+"Hardware profiles" for the keys.
 
 Inspect a specific profile:
 
@@ -392,6 +398,7 @@ p4n4-emu setup [--arch arm64]
 # Inspect profiles
 p4n4-emu profile list
 p4n4-emu profile show <name>
+p4n4-emu profile validate [NAME|FILE ...]   # check profile files against the schema
 p4n4-emu profile switch <name>   # new CPU / memory limits, no restart
 
 # Start / stop
@@ -407,12 +414,15 @@ p4n4-emu logs [SERVICE] --stack <stack> [--tail 100] [--no-follow]
 # Simulator only
 p4n4-emu sim start [--interval 2.0] [--devices 1 | --scenario FILE] [--mqtt-host HOST] [--network NAME]
                    [--username USER] [--tls] [--ca-file PATH] [--qos 0|1|2] [--retain]
-p4n4-emu sim check FILE   # validate a scenario (devices, measurements, faults)
+p4n4-emu sim start --replay recorded.csv [--speed 10] [--loop]   # publish a recording again
+p4n4-emu sim check FILE   # validate a scenario (devices, feeds, firmware-like devices, faults)
+                          # or a recording (CSV or InfluxDB export)
 p4n4-emu sim stop
 p4n4-emu sim status
 
 # Run a Pi script against the emulated board (RPi.GPIO, lgpio, gpiod, gpiozero, smbus2, spidev, pyserial)
-p4n4-emu run [--profile rpi5] [--gpio-mqtt HOST[:PORT]] [--device ID] [--scenario FILE] SCRIPT [ARGS...]
+p4n4-emu run [--profile rpi5] [--gpio-mqtt HOST[:PORT]] [--device ID] [--scenario FILE]
+             [--hardware FILE] [--gpiod v2|v1] SCRIPT [ARGS...]
 
 # LED threshold demo
 p4n4-emu run --gpio-mqtt localhost led_threshold.py

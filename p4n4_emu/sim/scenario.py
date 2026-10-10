@@ -20,15 +20,28 @@ A scenario is a YAML file (`sim start --scenario FILE`, or `SIM_SCENARIO` in the
           - {type: spike, measurement: temperature, probability: 0.01, magnitude: 15}
           - {type: dropout, probability: 0.05}
 
+      - id: esp32-garden         # a firmware-like device: see Mcu
+        mcu: {type: esp32, firmware: 1.4.2, sleep: 60}
+        measurements:
+          camera: {kind: image, width: 96, height: 96}      # frames for the edge runner
+          mic: {kind: audio, file: clips/door.wav}          # windows of a WAV file
+    replay:
+      - {file: recorded.csv, speed: 10, loop: true}         # see replay.py
+
 Measurements are the built-ins (temperature, humidity, pressure, raw), optionally with
-some of their wave settings changed, or new waves under any other name. Without a
-scenario the simulator runs the default one: `count` devices named emu-sensor-{n}
-publishing every built-in.
+some of their wave settings changed, new waves under any other name, or media feeds
+(`kind: image` / `kind: audio`, see Feed). Without a scenario the simulator runs the
+default one: `count` devices named emu-sensor-{n} publishing every built-in.
+
+Files a scenario names (a WAV file, a replay) are relative to the scenario's folder.
+`sim start` mounts them into the container and maps their names (load_scenario's
+*files*), so the scenario works unchanged on either side.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +58,89 @@ class Wave:
     min: float | None = None
     max: float | None = None
     unit: str = ""
+
+
+@dataclass(frozen=True)
+class Feed:
+    """A media feed: each reading is one camera frame or one audio window, published as
+    {"values": [...]}, the feature vector the edge runner (ei-runner) classifies.
+
+    image  width x height pixels with *channels* (1 or 3): a bright blob drifting over a
+           noisy background. encoding: packed (one 0xRRGGBB number per pixel, what Edge
+           Impulse image models take), uint8 (0-255 per channel) or float (0-1).
+    audio  *window* seconds of samples at *sample_rate*: a *frequency* tone plus noise, or
+           the next window of a WAV *file* (mono or mixed down; its own rate wins).
+           encoding: int16 (what Edge Impulse audio models take) or float (-1 to 1).
+    """
+
+    kind: str
+    encoding: str
+    noise: float = 0.05
+    width: int = 96
+    height: int = 96
+    channels: int = 3
+    sample_rate: int = 16000
+    window: float = 1.0
+    frequency: float = 440.0
+    amplitude: float = 0.5
+    file: str | None = None
+
+    @property
+    def features(self) -> int:
+        """Values in one reading (for a WAV file, at the scenario's sample_rate)."""
+        if self.kind == "image":
+            return self.width * self.height * (1 if self.encoding == "packed" else self.channels)
+        return int(self.sample_rate * self.window)
+
+
+FEED_KEYS = {
+    "image": ("kind", "width", "height", "channels", "encoding", "noise"),
+    "audio": ("kind", "sample_rate", "window", "frequency", "amplitude", "noise", "file",
+              "encoding"),
+}
+FEED_ENCODINGS = {"image": ("packed", "uint8", "float"), "audio": ("int16", "float")}
+
+
+@dataclass(frozen=True)
+class Mcu:
+    """A device that behaves like microcontroller firmware rather than a perfect publisher.
+
+    It has its own MQTT connection (client id = the device id). On every connection it
+    registers on devices/<id>/register ({type, firmware, location}, what the onboarding
+    flow in the ai stack reads) until devices/<id>/status confirms it, and keeps
+    devices/<id>/availability (online / offline as its will / sleeping) retained.
+    *boot* is how long a power-on or wake takes before the first reading. With *sleep*
+    it deep-sleeps: wake, connect, publish one round, disconnect, sleep. *wifi_drop*
+    loses the connection (rolled each round) for its duration; readings taken meanwhile
+    are lost, or held up to *buffer* of them and sent on reconnect.
+    """
+
+    type: str = "esp32"
+    firmware: str = "p4n4-emu"
+    location: str | None = None
+    boot: float = 2.0
+    sleep: float | None = None
+    drop_probability: float = 0.0
+    drop_duration: float = 30.0
+    buffer: int = 0
+    availability: bool = True
+
+
+MCU_KEYS = ("type", "firmware", "location", "boot", "sleep", "wifi_drop", "buffer",
+            "availability")
+
+
+@dataclass(frozen=True)
+class Replay:
+    """Recorded readings published again on their own schedule (see replay.py)."""
+
+    file: str
+    speed: float = 1.0  # 10: ten times faster; 0: as fast as possible
+    loop: bool = False
+    devices: dict[str, str] = field(default_factory=dict)  # recorded id → id to publish as
+
+
+REPLAY_KEYS = ("file", "speed", "loop", "devices")
 
 
 # `raw` is not a wave: it is the accelerometer plus the board's CPU load
@@ -94,9 +190,10 @@ VALUE_FAULTS = ("spike", "stuck", "drift")
 @dataclass(frozen=True)
 class Device:
     id: str
-    measurements: dict[str, Wave | None]  # None: the raw measurement
+    measurements: dict[str, Wave | Feed | None]  # None: the raw measurement
     interval: float | None = None  # None: the scenario's
     faults: tuple[Fault, ...] = ()
+    mcu: Mcu | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +204,9 @@ class Scenario:
     retain: bool = False
     timestamp: bool = False
     seed: int | None = None
+    replays: tuple[Replay, ...] = ()
+    # Files the scenario names: (as written, the path it resolved to)
+    files: tuple[tuple[str, str], ...] = ()
 
     def interval_of(self, device: Device) -> float:
         return device.interval if device.interval is not None else self.interval
@@ -125,7 +225,9 @@ class ScenarioError(ValueError):
     pass
 
 
-def load_scenario(path: Path | str) -> Scenario:
+def load_scenario(path: Path | str, files: dict[str, str] | None = None) -> Scenario:
+    """Load a scenario file. The files it names are relative to its folder, unless
+    *files* maps a name as written to where the file is (inside the container)."""
     # Imported here: the hardware stubs use this module's waves, and they run in
     # the script's interpreter (`p4n4-emu run --python`), which may not have PyYAML
     import yaml
@@ -138,15 +240,36 @@ def load_scenario(path: Path | str) -> Scenario:
     except yaml.YAMLError as e:
         raise ScenarioError(f"Scenario {path} is not valid YAML: {e}") from e
     try:
-        return parse_scenario(doc)
+        return parse_scenario(doc, base=path.parent, files=files)
     except ScenarioError as e:
         raise ScenarioError(f"Scenario {path}: {e}") from e
 
 
-def parse_scenario(doc: Any) -> Scenario:
-    """Check a scenario document and build it; every error names where it is."""
+def parse_scenario(
+    doc: Any, base: Path | None = None, files: dict[str, str] | None = None
+) -> Scenario:
+    """Check a scenario document and build it; every error names where it is.
+
+    Files it names resolve against *base* (default: the current directory), or
+    through *files* (name as written → path).
+    """
+    resolved: dict[str, str] = {}
+
+    def resolve(value: Any, where: str) -> str:
+        if not isinstance(value, str) or not value:
+            raise ScenarioError(f"{where}: expected a file path")
+        if files and value in files:
+            path = files[value]
+        else:
+            path = str((base or Path()).joinpath(Path(value).expanduser()).resolve())
+        if not Path(path).is_file():
+            raise ScenarioError(f"{where}: no such file {value!r}")
+        resolved[value] = path
+        return path
+
     m = _mapping(doc, "the scenario")
-    _known(m, ("interval", "qos", "retain", "timestamp", "seed", "devices"), "the scenario")
+    _known(m, ("interval", "qos", "retain", "timestamp", "seed", "devices", "replay"),
+           "the scenario")
     scenario = Scenario(
         devices=(),
         interval=_positive(m.get("interval", 2.0), "interval"),
@@ -155,21 +278,88 @@ def parse_scenario(doc: Any) -> Scenario:
         timestamp=_bool(m.get("timestamp", False), "timestamp"),
         seed=_int(m["seed"], "seed") if m.get("seed") is not None else None,
     )
+    replays = m.get("replay") or []
+    if not isinstance(replays, list):
+        raise ScenarioError("replay: expected a list")
+    replays = [_replay(r, f"replay[{i}]", resolve) for i, r in enumerate(replays)]
     entries = m.get("devices")
-    if not isinstance(entries, list) or not entries:
-        raise ScenarioError("devices: expected a non-empty list")
-    devices = [d for i, e in enumerate(entries) for d in _devices(e, f"devices[{i}]")]
+    if entries is None and replays:
+        entries = []
+    elif not isinstance(entries, list) or not entries:
+        raise ScenarioError("devices: expected a non-empty list (or a replay)")
+    devices = [d for i, e in enumerate(entries) for d in _devices(e, f"devices[{i}]", resolve)]
     seen: set[str] = set()
     for d in devices:
         if d.id in seen:
             raise ScenarioError(f"device id {d.id!r} is used twice")
         seen.add(d.id)
-    return replace(scenario, devices=tuple(devices))
+    return replace(scenario, devices=tuple(devices), replays=tuple(replays),
+                   files=tuple(resolved.items()))
 
 
-def _devices(entry: Any, where: str) -> list[Device]:
+def _replay(entry: Any, where: str, resolve: Callable[[Any, str], str]) -> Replay:
+    if isinstance(entry, str):
+        entry = {"file": entry}
     m = _mapping(entry, where)
-    _known(m, ("id", "count", "interval", "measurements", "faults"), where)
+    _known(m, REPLAY_KEYS, where)
+    speed = _number(m.get("speed", 1.0), f"{where}.speed")
+    if speed < 0:
+        raise ScenarioError(f"{where}.speed: can't be negative (0 publishes as fast as it can)")
+    devices = m.get("devices") or {}
+    if not isinstance(devices, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) and _topic_level(v) for k, v in devices.items()
+    ):
+        raise ScenarioError(f"{where}.devices: expected recorded id: new id pairs")
+    loop = _bool(m.get("loop", False), f"{where}.loop")
+    if loop and speed == 0:
+        raise ScenarioError(f"{where}: loop needs a speed above 0, or it never stops")
+    return Replay(resolve(m.get("file"), f"{where}.file"), speed, loop, dict(devices))
+
+
+def _topic_level(value: str) -> bool:
+    return bool(value) and not any(c in value for c in "/+#") and value == value.strip()
+
+
+def _mcu(value: Any, where: str) -> Mcu:
+    if value is True or value is None:
+        value = {}
+    m = _mapping(value, where)
+    _known(m, MCU_KEYS, where)
+    mcu = Mcu()
+    changes: dict[str, Any] = {}
+    for key in ("type", "firmware", "location"):
+        if key in m:
+            if not isinstance(m[key], str | int | float) or isinstance(m[key], bool):
+                raise ScenarioError(f"{where}.{key}: expected text")
+            changes[key] = str(m[key])
+    if "boot" in m:
+        changes["boot"] = _number(m["boot"], f"{where}.boot")
+        if changes["boot"] < 0:
+            raise ScenarioError(f"{where}.boot: can't be negative")
+    if m.get("sleep") is not None:
+        changes["sleep"] = _positive(m["sleep"], f"{where}.sleep")
+    if "wifi_drop" in m:
+        drop = _mapping(m["wifi_drop"], f"{where}.wifi_drop")
+        _known(drop, ("probability", "duration"), f"{where}.wifi_drop")
+        probability = _number(drop.get("probability", 1.0), f"{where}.wifi_drop.probability")
+        if not 0 <= probability <= 1:
+            raise ScenarioError(f"{where}.wifi_drop.probability: must be between 0 and 1")
+        changes["drop_probability"] = probability
+        changes["drop_duration"] = _positive(
+            drop.get("duration", 30.0), f"{where}.wifi_drop.duration"
+        )
+    if "buffer" in m:
+        changes["buffer"] = _int(m["buffer"], f"{where}.buffer")
+        if changes["buffer"] < 0:
+            raise ScenarioError(f"{where}.buffer: can't be negative")
+    if "availability" in m:
+        changes["availability"] = _bool(m["availability"], f"{where}.availability")
+    return replace(mcu, **changes)
+
+
+def _devices(entry: Any, where: str, resolve: Callable[[Any, str], str]) -> list[Device]:
+    m = _mapping(entry, where)
+    _known(m, ("id", "count", "interval", "measurements", "faults", "mcu"), where)
     id_ = m.get("id")
     if not isinstance(id_, str) or not id_:
         raise ScenarioError(f"{where}.id: expected a device id")
@@ -184,15 +374,59 @@ def _devices(entry: Any, where: str) -> list[Device]:
         if any(c in i for c in "/+#") or i != i.strip():
             raise ScenarioError(f"{where}.id: {i!r} can't contain '/', '+', '#' or edge spaces")
 
-    measurements = _measurements(m.get("measurements", list(BUILTINS)), f"{where}.measurements")
+    measurements = _measurements(
+        m.get("measurements", list(BUILTINS)), f"{where}.measurements", resolve
+    )
     faults = tuple(
         _fault(f, f"{where}.faults[{i}]", measurements) for i, f in enumerate(m.get("faults") or [])
     )
     interval = _positive(m["interval"], f"{where}.interval") if "interval" in m else None
-    return [Device(i, dict(measurements), interval, faults) for i in ids]
+    mcu = _mcu(m["mcu"], f"{where}.mcu") if "mcu" in m and m["mcu"] is not False else None
+    return [Device(i, dict(measurements), interval, faults, mcu) for i in ids]
 
 
-def _measurements(value: Any, where: str) -> dict[str, Wave | None]:
+def _feed(m: dict, where: str, resolve: Callable[[Any, str], str]) -> Feed:
+    kind = m.get("kind")
+    if kind not in FEED_KEYS:
+        raise ScenarioError(f"{where}.kind: expected one of {', '.join(FEED_KEYS)}")
+    _known(m, FEED_KEYS[kind], where)
+    encoding = m.get("encoding", FEED_ENCODINGS[kind][0])
+    if encoding not in FEED_ENCODINGS[kind]:
+        raise ScenarioError(
+            f"{where}.encoding: expected one of {', '.join(FEED_ENCODINGS[kind])}"
+        )
+    changes: dict[str, Any] = {}
+    for key in ("width", "height", "sample_rate"):
+        if key in m:
+            changes[key] = _int(m[key], f"{where}.{key}")
+            if changes[key] < 1:
+                raise ScenarioError(f"{where}.{key}: must be at least 1")
+    if "channels" in m:
+        changes["channels"] = _choice(m["channels"], (1, 3), f"{where}.channels")
+    for key in ("window", "frequency"):
+        if key in m:
+            changes[key] = _positive(m[key], f"{where}.{key}")
+    for key in ("noise", "amplitude"):
+        if key in m:
+            changes[key] = _number(m[key], f"{where}.{key}")
+            if not 0 <= changes[key] <= 1:
+                raise ScenarioError(f"{where}.{key}: must be between 0 and 1 (of full scale)")
+    feed = Feed(kind, encoding, **changes)
+    if "file" in m:
+        path = resolve(m["file"], f"{where}.file")
+        from p4n4_emu.sim import media  # the wave module's header check
+
+        try:
+            rate = media.wav_rate(path)
+        except ValueError as e:
+            raise ScenarioError(f"{where}.file: {e}") from None
+        feed = replace(feed, file=path, sample_rate=rate)
+    return feed
+
+
+def _measurements(
+    value: Any, where: str, resolve: Callable[[Any, str], str] | None = None
+) -> dict[str, Wave | Feed | None]:
     if isinstance(value, list):
         value = {name: None for name in value}
     m = _mapping(value, where)
@@ -207,6 +441,9 @@ def _measurements(value: Any, where: str) -> dict[str, Wave | None]:
             if settings is not None:
                 raise ScenarioError(f"{at}: raw takes no settings")
             out[name] = None
+            continue
+        if isinstance(settings, dict) and "kind" in settings:
+            out[name] = _feed(settings, at, resolve or (lambda v, w: str(v)))
             continue
         out[name] = _wave(settings, at, BUILTIN_WAVES.get(name))
     return out
@@ -256,8 +493,10 @@ def _fault(entry: Any, where: str, measurements: dict[str, Wave | None]) -> Faul
     if measurement is not None:
         if measurement not in measurements:
             raise ScenarioError(f"{where}.measurement: the device has no {measurement!r}")
-        if kind in VALUE_FAULTS and measurements[measurement] is None:
-            raise ScenarioError(f"{where}: {kind} needs a measurement with a value, not raw")
+        if kind in VALUE_FAULTS and not isinstance(measurements[measurement], Wave):
+            raise ScenarioError(
+                f"{where}: {kind} needs a measurement with a value, not raw or a feed"
+            )
     settings = {k: _number(m[k], f"{where}.{k}") for k in FAULT_SETTINGS[kind] if k in m}
     for key in ("magnitude", "duration", "seconds"):
         if settings.get(key, 0) < 0:

@@ -11,6 +11,7 @@ from rich.table import Table
 
 from p4n4_emu.commands.sim import project_broker, start_simulator
 from p4n4_emu.overlays.generator import (
+    GPU_SERVICES,
     Scale,
     Share,
     budget_scale,
@@ -20,7 +21,9 @@ from p4n4_emu.overlays.generator import (
 )
 from p4n4_emu.overlays.paths import existing_overlay, overlay_path, remove_overlay
 from p4n4_emu.profiles.loader import Profile, load_profile
+from p4n4_emu.sim.scenario import Replay
 from p4n4_emu.utils import compose as dc
+from p4n4_emu.utils.docker_host import docker_host
 from p4n4_emu.utils.docker_info import detect_block_device
 from p4n4_emu.utils.preflight import check_or_exit, needs_qemu
 from p4n4_emu.utils.project import (
@@ -45,6 +48,21 @@ def resolve_platform(prof: Profile, arch: str, native: bool) -> str | None:
     if arch:
         return docker_platform(arch)
     return docker_platform(prof.arch) if prof.is_arm else None
+
+
+def resolve_gpu(prof: Profile, platform: str | None, no_gpu: bool) -> tuple[str | None, str]:
+    """The GPU driver whose device GPU_SERVICES reserve (None: CPU only), and why
+    not, when the profile has a GPU the run can't use."""
+    if prof.gpu is None:
+        return None, ""
+    if no_gpu:
+        return None, "--no-gpu"
+    if needs_qemu(platform):
+        return None, f"{platform} images run under QEMU, which can't reach the host's GPU"
+    host = docker_host()
+    if host is None or not host.nvidia:
+        return None, "Docker has no NVIDIA runtime (install nvidia-container-toolkit)"
+    return prof.gpu, ""
 
 
 def stack_shares(stack: str, stack_dir: Path | None) -> dict[str, Share]:
@@ -93,6 +111,10 @@ def cmd(
             help="Run images for the host architecture; only apply resource limits.",
         ),
     ] = False,
+    no_gpu: Annotated[
+        bool,
+        typer.Option("--no-gpu", help="Run a GPU profile's services on the CPU only."),
+    ] = False,
     sim: Annotated[bool, typer.Option("--sim", help="Also start the sensor simulator.")] = False,
     sim_interval: Annotated[
         float | None,
@@ -112,6 +134,13 @@ def cmd(
         typer.Option(
             "--sim-scenario",
             help="Simulator scenario file: devices, measurements and faults (see `sim check`).",
+        ),
+    ] = None,
+    sim_replay: Annotated[
+        Path | None,
+        typer.Option(
+            "--sim-replay",
+            help="Recorded readings for the simulator to publish again (see `sim start --replay`).",
         ),
     ] = None,
     build: Annotated[bool, typer.Option("--build", help="Rebuild images before starting.")] = False,
@@ -135,6 +164,14 @@ def cmd(
         raise typer.Exit(1) from e
 
     check_or_exit(require_qemu=needs_qemu(platform), platform=platform or "linux/arm64")
+
+    gpu, no_gpu_reason = resolve_gpu(prof, platform, no_gpu)
+    if prof.gpu and gpu is None:
+        console.print(
+            f"[yellow]Warning:[/yellow] {prof.name} has a GPU, but {no_gpu_reason}: "
+            f"{', '.join(sorted(GPU_SERVICES))} run on the CPU only."
+            + (" Add --native to run host images with the GPU." if needs_qemu(platform) else "")
+        )
 
     blkio_device = detect_block_device()
     if blkio_device:
@@ -179,6 +216,7 @@ def cmd(
             services=shares[s].keys(),
             platform=platform,
             scale=scale,
+            gpu=gpu,
         )
         overlay_file = overlay_path(cwd, s)
 
@@ -213,13 +251,14 @@ def cmd(
             interval=sim_interval,
             devices=sim_devices,
             scenario=sim_scenario,
+            replay=Replay(str(sim_replay)) if sim_replay else None,
             broker=broker_info or project_broker(stack_dir),
         )
         if rc != 0:
             raise typer.Exit(rc)
 
     if not dry_run:
-        _print_summary(prof, blkio_device, stacks_to_run, platform, scale)
+        _print_summary(prof, blkio_device, stacks_to_run, platform, scale, gpu)
 
 
 def _is_running(cwd: Path, stack: str) -> bool:
@@ -248,6 +287,7 @@ def _print_summary(
     stacks: list[str],
     platform: str | None,
     scale: Scale,
+    gpu: str | None = None,
 ) -> None:
     table = Table(title=f"p4n4-emu active — profile: {prof.name}", show_lines=False)
     table.add_column("Setting")
@@ -265,5 +305,7 @@ def _print_summary(
     )
     table.add_row("Disk I/O", disk_io)
     table.add_row("Platform", platform or "native")
+    if prof.gpu:
+        table.add_row("GPU", f"{gpu} ({', '.join(sorted(GPU_SERVICES))})" if gpu else "CPU only")
     table.add_row("Stacks", ", ".join(stacks))
     console.print(table)
