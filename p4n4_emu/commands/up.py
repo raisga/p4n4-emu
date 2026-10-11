@@ -17,15 +17,19 @@ from p4n4_emu.overlays.generator import (
     budget_scale,
     docker_platform,
     render_overlay,
+    resolve_cpuset,
     service_shares,
 )
 from p4n4_emu.overlays.paths import existing_overlay, overlay_path, remove_overlay
 from p4n4_emu.profiles.loader import Profile, load_profile
+from p4n4_emu.profiles.shares import Overrides, merge, project_shares
 from p4n4_emu.sim.scenario import Replay
 from p4n4_emu.utils import compose as dc
+from p4n4_emu.utils.calibration import CpuFactor
+from p4n4_emu.utils.calibration import cpu_factor as calibrated_factor
 from p4n4_emu.utils.docker_host import docker_host
 from p4n4_emu.utils.docker_info import detect_block_device
-from p4n4_emu.utils.preflight import check_or_exit, needs_qemu
+from p4n4_emu.utils.preflight import check_or_exit, host_platform, needs_qemu
 from p4n4_emu.utils.project import (
     STACKS,
     expand_stacks,
@@ -65,11 +69,31 @@ def resolve_gpu(prof: Profile, platform: str | None, no_gpu: bool) -> tuple[str 
     return prof.gpu, ""
 
 
-def stack_shares(stack: str, stack_dir: Path | None) -> dict[str, Share]:
+def share_overrides(prof: Profile) -> Overrides:
+    """The profile's share overrides, then the current project's on top."""
+    return merge(prof.shares, project_shares())
+
+
+def stack_shares(
+    stack: str, stack_dir: Path | None, overrides: Overrides | None = None
+) -> dict[str, Share]:
     """Shares for the services actually defined in *stack*'s compose config."""
     cwd = resolve_stack_dir(stack_dir, stack)
     services = dc.list_services(cwd) if cwd is not None else None
-    return service_shares(stack, services)
+    return service_shares(stack, services, overrides)
+
+
+def resolve_cpu_factor(prof: Profile, platform: str | None, override: float | None) -> CpuFactor:
+    """--cpu-factor if given, else board core / host core from `p4n4-emu calibrate`."""
+    if override is not None:
+        return CpuFactor(override, "--cpu-factor")
+    return calibrated_factor(prof, platform or host_platform())
+
+
+def host_cpus() -> int | None:
+    """Cores the Docker engine sees (on Docker Desktop, the VM's), None if unknown."""
+    host = docker_host()
+    return host.cpus if host is not None and host.cpus else None
 
 
 def budget_stacks(stacks_to_run: list[str]) -> list[str]:
@@ -115,6 +139,24 @@ def cmd(
         bool,
         typer.Option("--no-gpu", help="Run a GPU profile's services on the CPU only."),
     ] = False,
+    cpu_factor: Annotated[
+        float | None,
+        typer.Option(
+            "--cpu-factor",
+            min=0.01,
+            max=1.0,
+            help="Multiply CPU limits by this (board core speed / host core speed). "
+            "Default: from `p4n4-emu calibrate` and the profile's cpu_score; 1 turns it off.",
+        ),
+    ] = None,
+    cpuset: Annotated[
+        str | None,
+        typer.Option(
+            "--cpuset",
+            help="Pin every service to host cores: auto (the first ones, as many as the "
+            "profile has) or a list such as 0-3 or 0,2,4,6.",
+        ),
+    ] = None,
     sim: Annotated[bool, typer.Option("--sim", help="Also start the sensor simulator.")] = False,
     sim_interval: Annotated[
         float | None,
@@ -159,6 +201,8 @@ def cmd(
     try:
         prof = load_profile(profile)
         platform = resolve_platform(prof, arch, native)
+        overrides = share_overrides(prof)
+        cores = resolve_cpuset(cpuset, prof, host_cpus()) if cpuset else None
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1) from e
@@ -172,6 +216,10 @@ def cmd(
             f"{', '.join(sorted(GPU_SERVICES))} run on the CPU only."
             + (" Add --native to run host images with the GPU." if needs_qemu(platform) else "")
         )
+
+    factor = resolve_cpu_factor(prof, platform, cpu_factor)
+    if factor.value == 1 and factor.note and prof.cpu_score is not None:
+        console.print(f"[dim]CPU limits are core counts, not speed: {factor.note}.[/dim]")
 
     blkio_device = detect_block_device()
     if blkio_device:
@@ -191,7 +239,7 @@ def cmd(
 
     # All stacks of the project run on one device, so their combined limits must
     # fit within the profile even when they are started one at a time.
-    shares = {s: stack_shares(s, stack_dir) for s in budget_stacks(stacks_to_run)}
+    shares = {s: stack_shares(s, stack_dir, overrides) for s in budget_stacks(stacks_to_run)}
     scale = budget_scale(shares.values())
 
     # Resolve every stack before starting any, so a missing one starts nothing
@@ -217,6 +265,10 @@ def cmd(
             platform=platform,
             scale=scale,
             gpu=gpu,
+            overrides=overrides,
+            cpu_factor=factor.value,
+            cpuset=cores,
+            cpuset_auto=cpuset == "auto",
         )
         overlay_file = overlay_path(cwd, s)
 
@@ -258,7 +310,7 @@ def cmd(
             raise typer.Exit(rc)
 
     if not dry_run:
-        _print_summary(prof, blkio_device, stacks_to_run, platform, scale, gpu)
+        _print_summary(prof, blkio_device, stacks_to_run, platform, scale, gpu, factor, cores)
 
 
 def _is_running(cwd: Path, stack: str) -> bool:
@@ -288,12 +340,24 @@ def _print_summary(
     platform: str | None,
     scale: Scale,
     gpu: str | None = None,
+    factor: CpuFactor | None = None,
+    cores: str | None = None,
 ) -> None:
     table = Table(title=f"p4n4-emu active — profile: {prof.name}", show_lines=False)
     table.add_column("Setting")
     table.add_column("Value")
     table.add_row("Profile", f"{prof.name} — {prof.description}")
-    table.add_row("CPU limit", f"{prof.cpus} cores")
+    factor = factor or CpuFactor()
+    if factor.value != 1:
+        table.add_row(
+            "CPU limit",
+            f"{prof.cpus * factor.value:.2f} host cores = {prof.cpus:g} × {factor.value:.3f} "
+            f"({factor.note})",
+        )
+    else:
+        table.add_row("CPU limit", f"{prof.cpus:g} cores")
+    if cores:
+        table.add_row("Pinned to", f"host cores {cores}")
     table.add_row("Memory limit", prof.memory)
     if scale != Scale():
         table.add_row(

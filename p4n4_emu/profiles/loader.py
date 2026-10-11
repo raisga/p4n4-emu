@@ -20,11 +20,18 @@ from typing import Any
 
 import yaml
 
+from p4n4_emu.profiles.shares import Overrides, SharesError, parse_shares
+
 _DEFS_DIR = Path(__file__).parent / "definitions"
 USER_DIR = Path.home() / ".p4n4-emu" / "profiles"
 
 _SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kmgKMG]?)$")
 _MULTIPLIERS = {"": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
+
+# Linux sizes threads-max at one thread per 8 kernel stacks of RAM (16 KiB each
+# on arm64), and pid_max defaults to 32768 on a board with up to 32 cores
+_PID_MAX = 32768
+_BYTES_PER_THREAD = 8 * 16 * 1024
 
 # Architectures a profile may name (the ones overlays.generator maps to a platform)
 ARCHES = ("x86_64", "amd64", "arm64", "aarch64", "armv7", "arm")
@@ -37,11 +44,25 @@ PROFILE_KEYS = {
     "board": (False, "GPIO board `p4n4-emu run` emulates (see hw.board)"),
     "gpu": (False, f"GPU the AI and edge services reserve: {', '.join(GPUS)}"),
     "cpus": (True, "CPU cores the device has"),
+    "cpu_score": (
+        False,
+        "single-thread 7-Zip MIPS of one core (`7z b -mmt1`, sbc-bench's '7-zip single'); "
+        "with `p4n4-emu calibrate`, scales cpus to the host's speed",
+    ),
     "memory": (True, "memory for containers, e.g. 3584m or 7g"),
     "memory_swap": (False, "memory plus swap (default: memory, no swap)"),
     "blkio_weight": (False, "relative disk I/O weight, 10-1000 (default 500)"),
     "blkio_read_bps": (True, "disk read rate in bytes/s, e.g. 52428800 or 50m"),
     "blkio_write_bps": (True, "disk write rate in bytes/s"),
+    "pids_limit": (
+        False,
+        "processes and threads the device runs (default: what Linux allows for memory)",
+    ),
+    "oom_score_adj": (
+        False,
+        "-1000 to 1000: how willing the host's OOM killer is to pick these containers",
+    ),
+    "shares": (False, "per-service CPU and memory shares, e.g. {influxdb: {cpu: 0.5}}"),
 }
 
 
@@ -72,6 +93,10 @@ class Profile:
     arch: str = "x86_64"
     board: str | None = None  # the emulated board (hw.board), None without a GPIO header
     gpu: str | None = None  # "nvidia": the GPU services reserve one, when the host has it
+    cpu_score: float | None = None  # 7-Zip MIPS of one core, None: unknown
+    pids_limit: int | None = None  # None: derived from memory (device_pids)
+    oom_score_adj: int | None = None
+    shares: Overrides = field(default_factory=dict)
     source: Path | None = None  # the file it was loaded from
     _memory_bytes: int = field(default=0, init=False, repr=False)
     _memory_swap_bytes: int = field(default=0, init=False, repr=False)
@@ -94,6 +119,14 @@ class Profile:
         return self._memory_bytes // (1024 * 1024)
 
     @property
+    def device_pids(self) -> int:
+        """Processes and threads the whole device runs: pids_limit, or Linux's
+        threads-max for this much memory (capped at the default pid_max)."""
+        if self.pids_limit is not None:
+            return self.pids_limit
+        return min(_PID_MAX, self.memory_bytes // _BYTES_PER_THREAD)
+
+    @property
     def is_arm(self) -> bool:
         return self.arch in ("arm64", "aarch64", "armv7", "arm")
 
@@ -111,6 +144,7 @@ class Profile:
             "board": self.board,
             "gpu": self.gpu,
             "cpus": self.cpus,
+            "cpu_score": self.cpu_score,
             "memory": self.memory,
             "memory_bytes": self.memory_bytes,
             "memory_swap": self.memory_swap,
@@ -118,6 +152,10 @@ class Profile:
             "blkio_weight": self.blkio_weight,
             "blkio_read_bps": self.blkio_read_bps,
             "blkio_write_bps": self.blkio_write_bps,
+            "pids_limit": self.pids_limit,
+            "device_pids": self.device_pids,
+            "oom_score_adj": self.oom_score_adj,
+            "shares": self.shares,
             "source": str(self.source) if self.source else None,
         }
 
@@ -218,13 +256,28 @@ def parse_profile(doc: Any, name: str, source: Path | None = None) -> Profile:
     if _parse_bytes(memory_swap) < _parse_bytes(memory):
         raise ProfileError("memory_swap: is memory plus swap, so can't be below memory")
     weight = doc.get("blkio_weight", 500)
-    if isinstance(weight, bool) or not isinstance(weight, int) or not 10 <= weight <= 1000:
+    if not _whole(weight) or not 10 <= weight <= 1000:
         raise ProfileError("blkio_weight: expected a whole number from 10 to 1000")
     rates = {}
     for key in ("blkio_read_bps", "blkio_write_bps"):
         rates[key] = _parse_bytes(_size(doc[key], key))
         if rates[key] <= 0:
             raise ProfileError(f"{key}: must be positive")
+    cpu_score = doc.get("cpu_score")
+    if cpu_score is not None:
+        cpu_score = _number(cpu_score, "cpu_score")
+        if cpu_score <= 0:
+            raise ProfileError("cpu_score: must be positive")
+    pids_limit = doc.get("pids_limit")
+    if pids_limit is not None and (not _whole(pids_limit) or pids_limit < 64):
+        raise ProfileError("pids_limit: expected a whole number, at least 64")
+    oom = doc.get("oom_score_adj")
+    if oom is not None and (not _whole(oom) or not -1000 <= oom <= 1000):
+        raise ProfileError("oom_score_adj: expected a whole number from -1000 to 1000")
+    try:
+        shares = parse_shares(doc.get("shares"))
+    except SharesError as e:
+        raise ProfileError(str(e)) from e
 
     return Profile(
         name=name,
@@ -236,9 +289,17 @@ def parse_profile(doc: Any, name: str, source: Path | None = None) -> Profile:
         arch=arch,
         board=board,
         gpu=gpu,
+        cpu_score=cpu_score,
+        pids_limit=pids_limit,
+        oom_score_adj=oom,
+        shares=shares,
         source=source,
         **rates,
     )
+
+
+def _whole(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _number(value: Any, key: str) -> float:

@@ -711,6 +711,21 @@ def test_status_json(status_env, tmp_path):
     assert svc["ports"] == [{"published": 1883, "target": 1883, "protocol": "tcp"}]
 
 
+def test_status_shows_core_speed_and_pinning(status_env, tmp_path):
+    import json
+
+    path = paths.overlay_path(tmp_path / "iot", "iot")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_overlay(
+        load_profile("rpi4"), "iot", None, services=["mqtt"], cpu_factor=0.439, cpuset="0-3",
+    ))
+    result = _status()
+    assert result.exit_code == 0, result.output
+    assert "CPU limits × 0.439 for core speed; pinned to host cores 0-3" in result.output
+    (stack,) = json.loads(_status("--json").output)["stacks"]
+    assert (stack["cpu_factor"], stack["cpuset"]) == (0.439, "0-3")
+
+
 def test_status_json_without_overlay(status_env):
     import json
 
@@ -829,7 +844,7 @@ def _ai_overlay(stack_dir):
 def _host(runtimes):
     from p4n4_emu.utils.docker_host import DockerHost
 
-    return DockerHost("29.4.1", "2", "systemd", "Ubuntu 24.04", runtimes)
+    return DockerHost("29.4.1", "2", "systemd", "Ubuntu 24.04", runtimes=runtimes)
 
 
 def test_up_gpu_profile_reserves_the_gpu_for_gpu_services(ai_stack, preflight_calls, monkeypatch):

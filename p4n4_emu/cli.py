@@ -6,7 +6,7 @@ import typer
 from rich.console import Console
 
 from p4n4_emu import __version__
-from p4n4_emu.commands import down, logs, profile, run, setup, sim, status, up
+from p4n4_emu.commands import calibrate, down, logs, profile, run, setup, sim, status, up
 
 app = typer.Typer(
     name="p4n4-emu",
@@ -22,6 +22,7 @@ app.add_typer(sim.app, name="sim")
 
 # ── top-level commands ────────────────────────────────────────────────────────
 app.command("setup")(setup.cmd)
+app.command("calibrate")(calibrate.cmd)
 app.command("up")(up.cmd)
 app.command("down")(down.cmd)
 app.command("status")(status.cmd)

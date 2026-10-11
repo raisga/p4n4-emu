@@ -2,9 +2,10 @@
 
 `docker inspect` shows the limits a container was created with: Compose turns an
 overlay's `deploy.resources.limits.cpus` into `HostConfig.NanoCpus`, `memory`
-into `Memory`, `memswap_limit` into `MemorySwap` and `blkio_config` rates into
-`BlkioDevice{Read,Write}Bps`. A container created before the overlay changed,
-or started without it, keeps its old values until `up` recreates it.
+into `Memory`, `memswap_limit` into `MemorySwap`, `limits.pids` into `PidsLimit`,
+`cpuset` into `CpusetCpus` and `blkio_config` rates into
+`BlkioDevice{Read,Write}Bps`. A container created before the overlay changed, or
+started without it, keeps its old values until `up` recreates it.
 """
 
 from __future__ import annotations
@@ -55,6 +56,8 @@ class Limits:
     memswap: int | None = None
     read_bps: int | None = None
     write_bps: int | None = None
+    pids: int | None = None
+    cpuset: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,12 +81,16 @@ def expected_limits(overlay: dict) -> dict[str, Limits]:
         limits = ((svc.get("deploy") or {}).get("resources") or {}).get("limits") or {}
         blkio = svc.get("blkio_config") or {}
         cpus = limits.get("cpus")
+        pids = limits.get("pids")
+        cpuset = svc.get("cpuset")
         expected[name] = Limits(
             cpus=float(cpus) if cpus is not None else None,
             memory=parse_size(limits["memory"]) if "memory" in limits else None,
             memswap=parse_size(svc["memswap_limit"]) if "memswap_limit" in svc else None,
             read_bps=_first_rate(blkio.get("device_read_bps")),
             write_bps=_first_rate(blkio.get("device_write_bps")),
+            pids=int(pids) if pids is not None else None,
+            cpuset=str(cpuset) if cpuset else None,
         )
     return expected
 
@@ -99,6 +106,8 @@ def _limits_from_host_config(host: dict) -> Limits:
         memswap=positive(host.get("MemorySwap")),  # -1 means unlimited swap
         read_bps=_first_rate(host.get("BlkioDeviceReadBps")),
         write_bps=_first_rate(host.get("BlkioDeviceWriteBps")),
+        pids=positive(host.get("PidsLimit")),  # 0 or -1: no limit
+        cpuset=host.get("CpusetCpus") or None,
     )
 
 
@@ -157,6 +166,10 @@ def differences(expected: Limits, applied: Limits) -> list[str]:
     ):
         have = f"{applied.cpus:.2f}" if applied.cpus is not None else "none"
         out.append(f"cpus {have} ≠ {expected.cpus:.2f}")
+    if expected.cpuset is not None and expected.cpuset != applied.cpuset:
+        out.append(f"cpuset {applied.cpuset or 'none'} ≠ {expected.cpuset}")
+    if expected.pids is not None and expected.pids != applied.pids:
+        out.append(f"pids {applied.pids or 'none'} ≠ {expected.pids}")
     for field, label, unit in (
         ("memory", "memory", ""),
         ("memswap", "swap", ""),

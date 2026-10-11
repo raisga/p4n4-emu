@@ -58,6 +58,8 @@ _HOST_CONFIG = {
     "Memory": 375_390_208,
     "MemorySwap": 375_390_208,
     "BlkioWeight": 300,
+    "PidsLimit": 1638,
+    "CpusetCpus": "",
     "BlkioDeviceReadBps": [{"Path": "/dev/sda", "Rate": 104_857_600}],
     "BlkioDeviceWriteBps": [{"Path": "/dev/sda", "Rate": 104_857_600}],
 }
@@ -70,6 +72,8 @@ def test_expected_limits_from_overlay():
         memswap=358 * 1024**2,
         read_bps=104_857_600,
         write_bps=104_857_600,
+        # 5 % of the 32768 pids an 8 GB board runs
+        pids=1638,
     )
 
 
@@ -88,8 +92,28 @@ def test_applied_limits_match_expected(monkeypatch):
     assert usage.differences(usage.expected_limits(_overlay())["mqtt"], applied["p4n4-mqtt"]) == []
 
 
+def test_pids_and_cpuset_differences():
+    expected = Limits(pids=1638, cpuset="0-3")
+    assert usage.differences(expected, Limits(pids=None, cpuset="0-7")) == [
+        "cpuset 0-7 ≠ 0-3",
+        "pids none ≠ 1638",
+    ]
+    assert usage.differences(expected, Limits(pids=1638, cpuset="0-3")) == []
+
+
+def test_cpuset_read_from_overlay_and_host_config():
+    overlay = yaml.safe_load(
+        render_overlay(load_profile("rpi5"), "iot", None, services=["mqtt"], cpuset="0-3")
+    )
+    assert usage.expected_limits(overlay)["mqtt"].cpuset == "0-3"
+    assert usage._limits_from_host_config({"CpusetCpus": "0-3"}).cpuset == "0-3"
+
+
 def test_unlimited_container_has_no_limits():
-    host = {"NanoCpus": 0, "Memory": 0, "MemorySwap": 0, "BlkioDeviceReadBps": None}
+    host = {
+        "NanoCpus": 0, "Memory": 0, "MemorySwap": 0, "BlkioDeviceReadBps": None,
+        "PidsLimit": -1, "CpusetCpus": "",
+    }
     assert usage._limits_from_host_config(host) == Limits()
 
 

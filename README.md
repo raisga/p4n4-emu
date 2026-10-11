@@ -6,9 +6,12 @@ Applies Docker resource constraints (CPU, RAM, disk I/O) and optional QEMU ARM64
 
 ## How it works
 
-`p4n4-emu` generates a `*.emu.yml` overlay file per stack and passes it after the stack's own compose files (`compose.yaml` / `docker-compose.yml`, any `docker-compose.override.yml`, or `COMPOSE_FILE`) to `docker compose ... up -d`. The overlay covers the services the stack's compose config actually defines and injects `deploy.resources.limits` (CPU, memory), `memswap_limit` and optional `blkio_config` (disk I/O) per service. Production files are never touched.
+`p4n4-emu` generates a `*.emu.yml` overlay file per stack and passes it after the stack's own compose files (`compose.yaml` / `docker-compose.yml`, any `docker-compose.override.yml`, or `COMPOSE_FILE`) to `docker compose ... up -d`. The overlay covers the services the stack's compose config actually defines and injects `deploy.resources.limits` (CPU, memory, pids), `memswap_limit` and optional `blkio_config` (disk I/O) per service, and `cpuset` / `oom_score_adj` when asked for. Production files are never touched.
 
 All enabled stacks of a project share one emulated device: when their combined CPU or memory shares exceed the profile, every service is scaled down so the total fits.
+
+After `p4n4-emu calibrate`, CPU limits also follow core *speed*: a Pi 4 core does about
+0.44 of an i7-8650U core's work, so the Pi 4's four cores become 1.76 host cores.
 
 Overlays live in `~/.p4n4-emu/overlays/<stack-dir>-<hash>/<stack>.emu.yml`, one folder per
 stack directory, so two projects never share one. Each overlay records the profile it was
@@ -18,15 +21,15 @@ earlier versions (`~/.p4n4-emu/overlays/<profile>/`) are no longer read and can 
 
 ## Hardware profiles
 
-| Profile | CPU | Memory | Disk R/W | Arch |
-|---------|-----|--------|----------|------|
-| `rpi-zero2w` | 4 cores | 384 MB | 22 MB/s | arm64 |
-| `rpi3` | 4 cores | 768 MB | 22 MB/s | arm64 |
-| `rpi4` | 4 cores | 3.5 GB | 50 MB/s | arm64 |
-| `rpi5` | 4 cores | 7 GB | 100 MB/s | arm64 |
-| `jetson-orin-nano` | 6 cores | 7 GB | 500 MB/s | arm64 + NVIDIA GPU |
-| `mcu-class` | 1 core | 256 MB | 10 MB/s | x86_64 |
-| `nuc` | 4 cores | 14 GB | 200 MB/s | x86_64 |
+| Profile | CPU | Core speed (7-Zip MIPS) | Memory | Disk R/W | Arch |
+|---------|-----|-----|--------|----------|------|
+| `rpi-zero2w` | 4 cores | 838 | 384 MB | 22 MB/s | arm64 |
+| `rpi3` | 4 cores | 977 | 768 MB | 22 MB/s | arm64 |
+| `rpi4` | 4 cores | 1769 | 3.5 GB | 50 MB/s | arm64 |
+| `rpi5` | 4 cores | 3305 | 7 GB | 100 MB/s | arm64 |
+| `jetson-orin-nano` | 6 cores | 2153 | 7 GB | 500 MB/s | arm64 + NVIDIA GPU |
+| `mcu-class` | 1 core | — | 256 MB | 10 MB/s | x86_64 |
+| `nuc` | 4 cores | — | 14 GB | 200 MB/s | x86_64 |
 
 See [How faithful the emulation is](#how-faithful-the-emulation-is) for what each limit
 does and doesn't reproduce, and where the numbers come from. `mcu-class` is not a
@@ -37,6 +40,53 @@ microcontroller: it's a Linux container squeezed to 256 MB, the floor of the ran
 (nvidia-container-toolkit) and host-architecture images (`--native`): an arm64 image under
 QEMU can't use an x86 host's GPU. Without both, or with `--no-gpu`, `up` warns and those
 services run on the CPU only.
+
+**Core speed.** A CPU limit caps time, not speed, so by default four host cores stand in
+for four much slower Pi cores. `p4n4-emu calibrate` runs 7-Zip's single-thread benchmark
+(`7z b -mmt1`, in a `debian:bookworm-slim` container) and stores the host's score in
+`~/.p4n4-emu/calibration.json`. From then on, `up` multiplies every CPU limit by board core
+/ host core, using the profile's `cpu_score` (the same benchmark on the board, from
+[sbc-bench's results](https://github.com/ThomasKaiser/sbc-bench/blob/master/Results.md)).
+Scores are per Docker platform: images under QEMU run far slower than native ones, so
+calibrate that separately with `--platform arm64`. The factor never goes above 1, since a
+quota can't make a slow core faster: under QEMU it usually stays at 1, and the CPU limits
+stay core counts. `--cpu-factor` sets it by hand (`1` turns it off); `calibrate --show` lists
+each profile's factor. 7-Zip and not `sysbench cpu`: sysbench's prime loop is integer
+division, which arm64 does unusually fast, and it scores a Pi 4 core *above* an
+i7-8650U's.
+
+**Pinning.** `up --cpuset auto` puts every service on the first host cores, as many as the
+board has (or a list: `--cpuset 0-3`, `--cpuset 0,2,4,6`). The CPU quotas still apply on
+top. Work then spreads over the board's number of cores, not all of the host's: a
+single-threaded service can't run faster than one core, and four threads fight over four
+cores. `profile switch` moves `auto` pins to the new board's core count.
+
+**Processes and OOM.** Every service gets a pids limit (`deploy.resources.limits.pids`),
+its memory share of what the board runs in all. That is `pids_limit` in the profile, or
+Linux's own `threads-max` for that much memory (one thread per 128 KiB on arm64, at most
+pid_max's 32768): 3072 on a Zero 2 W, 28672 on a 4 GB Pi 4. With no swap (`memswap_limit`
+= memory), a service over its memory share is OOM-killed inside its own container, as the
+largest process would be on a Pi with no swap. Its `restart:` policy brings it back. A
+profile's `oom_score_adj` (-1000 to 1000) only decides which processes the *host's* OOM
+killer picks when the host itself runs out of memory: 500 makes the emulated services go
+before your desktop.
+
+**Per-service shares.** Each service gets a fixed fraction of the board (InfluxDB 40 % of
+the CPU and 35 % of the memory, for example). Change them in a profile's `shares:`, or for
+one project in `<project>/.p4n4-emu/config.yml`. Each field is a fraction above 0, up to 1.
+A field you leave out keeps its default, the project wins over the profile, and `"*"`
+changes the share of services that have no default:
+
+```yaml
+# <project>/.p4n4-emu/config.yml
+shares:
+  influxdb: {cpu: 0.5, memory: 0.4}
+  node-red: {memory: 0.25}
+  "*": {cpu: 0.05}        # services the stacks don't ship, e.g. one you added
+```
+
+The shares across the enabled stacks are still scaled down together when they add up to
+more than the board.
 
 **Your own profiles.** Put a profile file in `~/.p4n4-emu/profiles/<name>.yml`, or in a
 p4n4 project's `.p4n4-emu/profiles/`, and use it by name. A file with a built-in's name
@@ -55,6 +105,11 @@ blkio_read_bps: 400m        # bytes/s, or a size per second
 blkio_write_bps: 300m
 # board: rpi5               # a GPIO header for `p4n4-emu run`: rpi3, rpi4, rpi5, rpi-zero2w
 # gpu: nvidia               # the AI and edge services reserve a GPU
+# cpu_score: 3200           # single-thread 7-Zip MIPS of one core (sbc-bench's "7-zip single")
+# pids_limit: 16384         # processes and threads in all (default: from memory)
+# oom_score_adj: 500        # -1000–1000, for the host's OOM killer
+# shares:                   # per-service fractions of the board
+#   influxdb: {cpu: 0.5}
 ```
 
 Unknown keys, missing ones (`description`, `cpus`, `memory`, the two `blkio_*_bps`) and
@@ -208,8 +263,10 @@ project's stacks, and `p4n4 down` hands the stacks p4n4-emu started back to
 
 ```
 p4n4-emu setup [--arch arm64|armv7] [--check-only]
+p4n4-emu calibrate [--platform arm64|armv7] [--score MIPS] [--show] [--json]
 p4n4-emu up    [--profile rpi5] [--stack iot|ai|edge|dashboard|iot,ai|all]
                [--stack-dir PATH] [--arch arm64|armv7|x86_64 | --native] [--no-gpu]
+               [--cpu-factor 0.01–1] [--cpuset auto|LIST]
                [--sim] [--sim-interval 2.0] [--sim-devices 1] [--sim-scenario FILE]
                [--sim-replay FILE]
                [--build] [--pull] [--dry-run]
@@ -221,7 +278,7 @@ p4n4-emu logs  [SERVICE] [--stack iot|ai|edge|dashboard|iot,ai|all]
 p4n4-emu profile list [--json]
 p4n4-emu profile show <name> [--json]
 p4n4-emu profile validate [NAME|FILE ...] [--json]
-p4n4-emu profile switch <name> [--stack ...] [--dry-run]
+p4n4-emu profile switch <name> [--stack ...] [--cpu-factor 0.01–1] [--dry-run]
 p4n4-emu sim start [--interval 2.0] [--devices 1 | --scenario FILE]
                    [--mqtt-host HOST] [--network NAME] [--port PORT]
                    [--username USER] [--tls] [--ca-file PATH] [--cert-file PATH --key-file PATH]
@@ -523,8 +580,9 @@ dashboard that stalls on disk), not to predict latency or throughput on the real
 
 | What | How it's applied | Enforced | Approximated, or not at all |
 |------|------------------|----------|-----------------------------|
-| CPU | `deploy.resources.limits.cpus` → CFS quota (`cpu.max`) per container | Yes, cgroup v1 or v2 | It caps CPU *time*, not core *speed*: four host cores are much faster than four Cortex-A72 / A76 cores (TODO: performance factor). Each service gets a share and can't borrow what the others leave idle, as it could on a real board (TODO: shared slice). |
-| Memory | `limits.memory` → `memory.max`; over it, the kernel OOM-kills the container | Yes, cgroup v1 or v2 | Page cache counts towards the limit, as on the board. The OS's own share is left out of the profile (see below), not simulated. |
+| CPU | `deploy.resources.limits.cpus` → CFS quota (`cpu.max`) per container, × board core / host core after `calibrate`; `--cpuset` → `cpuset.cpus` | Yes, cgroup v1 or v2 | The quota caps CPU *time*. The core-speed factor comes from one benchmark (7-Zip): workloads leaning on SIMD, cache size or memory bandwidth will differ. Under QEMU the host is usually slower than the board already, so nothing is scaled. Each service gets a share and can't borrow what the others leave idle, as it could on a real board (TODO: shared slice). |
+| Processes | `limits.pids` → `pids.max`, the service's memory share of the board's `threads-max` | Yes, cgroup v1 or v2 | Split per service: one service can't use pids another leaves free. |
+| Memory | `limits.memory` → `memory.max`; over it, the kernel OOM-kills the container | Yes, cgroup v1 or v2 | Page cache counts towards the limit, as on the board. The OS's own share is left out of the profile (see below), not simulated. A service hits its own share even while the board would still have memory free (TODO: shared slice). `oom_score_adj` orders only the host's OOM kills. |
 | Swap | `memswap_limit` = memory: no swap | Yes on cgroup v2; on v1 only with swap accounting (`swapaccount=1`) | A board configured with swap has some; the profiles assume none. |
 | Disk bandwidth | `blkio_config` → `io.max` read/write bytes per second, on the whole disk that holds Docker's data root | Yes for direct and buffered I/O on cgroup v2; direct I/O only on v1 | Bandwidth only: no IOPS or latency limit, so small random writes are far faster than on an SD card (TODO). Reads served from page cache aren't throttled. Volumes or bind mounts on another disk aren't limited. Skipped when no block device is found (tmpfs, NFS, some btrfs / LVM setups, Docker Desktop). `profile switch` can't change it on running containers. |
 | Disk priority | `blkio_config.weight` → `io.bfq.weight` | Only with the BFQ I/O scheduler | Has no effect on hosts using `mq-deadline` or `none`, the usual default for NVMe. |
@@ -540,23 +598,23 @@ settings cap everything on top of them.
 
 | Profile | Board | CPU | Memory | Disk (read = write) |
 |---------|-------|-----|--------|------|
-| `rpi-zero2w` | Raspberry Pi Zero 2 W, 512 MB | 4 cores (Cortex-A53) | 384 MB: 512 MB minus the GPU's and the OS's share | 22 MB/s, the SD interface's ceiling |
-| `rpi3` | Raspberry Pi 3 Model B, 1 GB | 4 cores (Cortex-A53) | 768 MB: 1 GB minus the GPU's and the OS's share | 22 MB/s, the SD interface's ceiling |
-| `rpi4` | Raspberry Pi 4, 4 GB | 4 cores (Cortex-A72) | 3.5 GB: 4 GB minus 512 MB for the OS | 50 MB/s, an SD card |
-| `rpi5` | Raspberry Pi 5, 8 GB | 4 cores (Cortex-A76) | 7 GB: 8 GB minus 1 GB for the OS | 100 MB/s, an SD card on the Pi 5's faster slot |
-| `jetson-orin-nano` | NVIDIA Jetson Orin Nano, 8 GB | 6 cores (Cortex-A78AE) | 7 GB: 8 GB minus 1 GB for the OS | 500 MB/s, an NVMe SSD |
+| `rpi-zero2w` | Raspberry Pi Zero 2 W, 512 MB | 4 cores (Cortex-A53, 1.0 GHz: 838) | 384 MB: 512 MB minus the GPU's and the OS's share | 22 MB/s, the SD interface's ceiling |
+| `rpi3` | Raspberry Pi 3 Model B, 1 GB | 4 cores (Cortex-A53, 1.2 GHz: 977) | 768 MB: 1 GB minus the GPU's and the OS's share | 22 MB/s, the SD interface's ceiling |
+| `rpi4` | Raspberry Pi 4, 4 GB | 4 cores (Cortex-A72, 1.8 GHz: 1769) | 3.5 GB: 4 GB minus 512 MB for the OS | 50 MB/s, an SD card |
+| `rpi5` | Raspberry Pi 5, 8 GB | 4 cores (Cortex-A76, 2.4 GHz: 3305) | 7 GB: 8 GB minus 1 GB for the OS | 100 MB/s, an SD card on the Pi 5's faster slot |
+| `jetson-orin-nano` | NVIDIA Jetson Orin Nano, 8 GB | 6 cores (Cortex-A78AE, 1.5 GHz: 2153) | 7 GB: 8 GB minus 1 GB for the OS | 500 MB/s, an NVMe SSD |
 | `nuc` | Intel NUC, 16 GB | 4 cores | 14 GB: 16 GB minus 2 GB for the OS | 200 MB/s, a conservative SSD |
 | `mcu-class` | none: a floor for very small Linux devices | 1 core | 256 MB | 10 MB/s |
 
-These are round estimates for each class of board, not measurements; the repo holds no
-benchmark behind them. Two known biases: real SD cards write much slower than they read,
-while the profiles use one rate for both; and the CPU count says nothing about per-core
-speed. `mcu-class` is a small x86 Linux container, not a microcontroller: with 256 MB, the
+Memory and disk are round estimates for each class of board, not measurements. Core speeds
+(the number after the clock) are measured: single-thread 7-Zip MIPS from sbc-bench's results
+table, on 64-bit OSes at stock clocks. A known bias: real SD cards write much slower than
+they read, while the profiles use one rate for both. `mcu-class` is a small x86 Linux container, not a microcontroller: with 256 MB, the
 iot stack's Node-RED gets 38 MiB and InfluxDB 89 MiB (InfluxDB alone used 137 MiB on a
 workstation), so expect them to be OOM-killed; `rpi-zero2w` is close to that. The Pi 3
 and Zero 2 W profiles assume 64-bit Raspberry Pi OS: for the 32-bit OS pass `--arch armv7`,
 though few of the stacks' images (InfluxDB 2 among the missing) publish armv7. To match
-your own hardware, measure it (`sysbench cpu`, `fio`, `free -m`) and write a profile of
+your own hardware, measure it (`7z b -mmt1` for `cpu_score`, `fio`, `free -m`) and write a profile of
 your own (see [Hardware profiles](#hardware-profiles)).
 
 ## License

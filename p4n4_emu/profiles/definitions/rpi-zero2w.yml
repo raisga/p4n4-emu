@@ -3,6 +3,8 @@ description: "Raspberry Pi Zero 2 W — 512 MB"
 arch: arm64
 board: rpi-zero2w
 cpus: 4
+# Single-thread 7-Zip MIPS, Cortex-A53 at 1.0 GHz (sbc-bench "7-zip single", 3E85)
+cpu_score: 838
 # 512 MB less what the GPU and the OS keep: too little for the whole iot stack
 memory: "384m"
 memory_swap: "384m"

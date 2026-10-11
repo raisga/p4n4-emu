@@ -3,6 +3,8 @@ description: "Raspberry Pi 4 — 4 GB"
 arch: arm64
 board: rpi4
 cpus: 4
+# Single-thread 7-Zip MIPS, Cortex-A72 at 1.8 GHz, Bullseye arm64 (sbc-bench "7-zip single", 3OBF)
+cpu_score: 1769
 memory: "3584m"
 memory_swap: "3584m"
 blkio_weight: 200

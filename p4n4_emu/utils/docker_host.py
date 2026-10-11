@@ -11,7 +11,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-_FIELDS = ("ServerVersion", "CgroupVersion", "CgroupDriver", "OperatingSystem")
+_FIELDS = ("ServerVersion", "CgroupVersion", "CgroupDriver", "OperatingSystem", "NCPU")
 # The runtimes' names, comma-separated, after the fields
 _RUNTIMES = "{{range $name, $_ := .Runtimes}}{{$name}},{{end}}"
 
@@ -22,7 +22,12 @@ class DockerHost:
     cgroup_version: str  # "1" or "2"
     cgroup_driver: str  # "systemd", "cgroupfs", or "none" (no limits, e.g. rootless)
     os: str
+    ncpu: str = ""  # cores the engine sees, as `docker info` prints them
     runtimes: tuple[str, ...] = ()
+
+    @property
+    def cpus(self) -> int | None:
+        return int(self.ncpu) if self.ncpu.isdigit() else None
 
     @property
     def nvidia(self) -> bool:

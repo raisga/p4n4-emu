@@ -10,6 +10,15 @@ x-p4n4-emu:
 {% if gpu %}
   gpu: {{ gpu }}
 {% endif %}
+{% if cpu_factor != 1 %}
+  cpu_factor: {{ "%.3f"|format(cpu_factor) }}
+{% endif %}
+{% if cpuset %}
+  cpuset: "{{ cpuset }}"
+{% if cpuset_auto %}
+  cpuset_auto: true
+{% endif %}
+{% endif %}
 
 {% if not services %}
 services: {}
@@ -25,6 +34,7 @@ services:
         limits:
           cpus: "{{ svc.cpus }}"
           memory: "{{ svc.memory_mb }}m"
+          pids: {{ svc.pids }}
         {% if svc.gpu %}
         reservations:
           devices:
@@ -33,6 +43,12 @@ services:
               capabilities: [gpu]
         {% endif %}
     memswap_limit: "{{ svc.memswap_mb }}m"
+    {% if cpuset %}
+    cpuset: "{{ cpuset }}"
+    {% endif %}
+    {% if profile.oom_score_adj is not none %}
+    oom_score_adj: {{ profile.oom_score_adj }}
+    {% endif %}
     {% if blkio_device %}
     blkio_config:
       weight: {{ profile.blkio_weight }}

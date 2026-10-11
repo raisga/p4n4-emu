@@ -76,21 +76,36 @@ Line numbers below refer to the code before the fix.
 
 ## 2. Emulation fidelity (P1)
 
-### CPU and memory
-- [ ] Add a per-profile **CPU performance factor**. Four desktop cores are much faster than
-      four Cortex-A72 (Pi 4) or A76 (Pi 5) cores, so scale `cpus` by a factor taken from a
-      reference benchmark (for example `sysbench cpu`). Add a `p4n4-emu calibrate` command
-      that measures the host.
+### CPU and memory — done 2026-10-10, shared slice deferred
+- [x] Per-profile **CPU performance factor**: `cpu_score` is the single-thread 7-Zip MIPS of
+      one core (`7z b -mmt1`, sbc-bench's "7-zip single" column: Zero 2 W 838, Pi 3 977,
+      Pi 4 1769, Orin Nano 2153, Pi 5 3305, all measured). `p4n4-emu calibrate` runs the
+      same benchmark in a `debian:bookworm-slim` container (p7zip-full, as sbc-bench) and
+      stores the host's score per Docker platform in `~/.p4n4-emu/calibration.json`
+      (`--platform arm64` measures under QEMU, `--score` records one by hand, `--show`
+      lists each profile's factor). `up` / `profile switch` multiply CPU limits by board /
+      host, never above 1 (under QEMU the host is usually slower already); `--cpu-factor`
+      overrides it. Not sysbench: its prime loop is integer division, which arm64 does
+      unusually fast, and it rated a Pi 4 core (1471) above the dev host's i7-8650U (1140),
+      which 7-Zip puts at 4054. The overlay records the factor; `status` shows it.
 - [ ] Replace budget scaling with a shared `cgroup_parent` slice. Scaling (section 1) keeps
       the summed per-service limits within the device, but it also stops one service from
       bursting into CPU the others leave idle, which a real board allows. A parent slice
       with the profile's `cpu.max` / `memory.max` gives both. It needs root or a systemd
-      user slice.
-- [ ] Optional `cpuset` pinning so a profile maps to real cores instead of a CFS quota.
-- [ ] Add a `pids_limit` per profile, and an OOM policy (`oom_score_adj`) that matches what a
-      Pi with no swap does.
-- [ ] Support **per-service share overrides** in the profile YAML (and in
-      `.p4n4.json` / `.p4n4-emu.yml` inside a project), instead of only in Jinja templates.
+      user slice. Deferred (2026-10-10): not now.
+- [x] `up --cpuset auto|LIST` pins every service to host cores (auto: the first ones, as many
+      as the profile has, checked against `docker info` NCPU); the quotas still apply.
+      `profile switch` moves auto pins to the new core count (`docker update --cpuset-cpus`).
+- [x] pids: every service gets `deploy.resources.limits.pids` (not `pids_limit`, which
+      Compose refuses next to a `deploy` limits block), its memory share of the board's
+      total: profile `pids_limit`, or Linux's threads-max for the memory (memory / 128 KiB,
+      at most pid_max 32768), at least 64. OOM: with no swap a service over its share is
+      killed in its own cgroup, as on a Pi; profile `oom_score_adj` only orders the
+      host's OOM kills. Both checked live: `pids.max`, `cpu.max`, `cpuset.cpus.effective`,
+      `OomScoreAdj`, and `docker update` of pids / cpuset.
+- [x] **Per-service share overrides** (`profiles/shares.py`): a profile's `shares:` and a
+      project's `.p4n4-emu/config.yml` (`shares:` only, schema-checked), field by field
+      over the defaults, the project winning; `"*"` changes the fallback share.
 
 ### Storage
 - [ ] Add a storage **capacity** limit per profile (SD card / eMMC size). Use `storage_opt.size`
@@ -315,8 +330,8 @@ Line numbers below refer to the code before the fix.
       stack repos cloned for the compose tests. The integration job runs on demand
       (`workflow_dispatch`, with a profile input) and weekly, on x86, on native arm64
       (`ubuntu-24.04-arm`), and optionally on x86 with arm64 images under QEMU.
-- [ ] `ruff format`: 19 files would be reformatted (hand-wrapped argument lists such as
-      `"docker", "run", "-d",`). Decide whether to adopt it before adding it to CI.
+- [x] `ruff format`: not adopted (2026-10-10). It would reformat 19 files, collapsing the
+      hand-wrapped argument lists such as `"docker", "run", "-d",`; CI keeps `ruff check`.
 
 ## 8. Packaging and docs (P2)
 

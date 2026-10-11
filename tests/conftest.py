@@ -35,6 +35,16 @@ def _no_user_profiles(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(loader, "USER_DIR", tmp_path_factory.mktemp("home") / "profiles")
 
 
+@pytest.fixture(autouse=True)
+def _no_calibration(monkeypatch, tmp_path_factory):
+    """The developer's ~/.p4n4-emu/calibration.json stays out of the tests: uncalibrated."""
+    from p4n4_emu.utils import calibration
+
+    path = tmp_path_factory.mktemp("calibration") / "calibration.json"
+    monkeypatch.setattr(calibration, "CALIBRATION_FILE", path)
+    return path
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--run-integration",

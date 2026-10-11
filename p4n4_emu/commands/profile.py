@@ -12,8 +12,19 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
-from p4n4_emu.commands.up import budget_stacks, stack_shares
-from p4n4_emu.overlays.generator import budget_scale, docker_platform, render_overlay
+from p4n4_emu.commands.up import (
+    budget_stacks,
+    host_cpus,
+    resolve_cpu_factor,
+    share_overrides,
+    stack_shares,
+)
+from p4n4_emu.overlays.generator import (
+    budget_scale,
+    docker_platform,
+    render_overlay,
+    resolve_cpuset,
+)
 from p4n4_emu.overlays.paths import META_KEY, existing_overlay, overlay_path, read_overlay
 from p4n4_emu.profiles.loader import (
     PROFILE_KEYS,
@@ -163,6 +174,7 @@ def show_cmd(
         ("Board (GPIO)", p.board or "none"),
         ("GPU", p.gpu or "none"),
         ("CPU cores (max)", str(p.cpus)),
+        ("Core speed", f"{p.cpu_score:g} 7-Zip MIPS" if p.cpu_score else "unknown (not scaled)"),
         ("Memory limit", p.memory),
         ("Swap limit", p.memory_swap),
         ("Memory (bytes)", str(p.memory_bytes)),
@@ -170,6 +182,9 @@ def show_cmd(
         ("blkio weight", str(p.blkio_weight)),
         ("Read BPS", f"{p.blkio_read_bps:,} B/s ({p.blkio_read_bps // 1_000_000} MB/s)"),
         ("Write BPS", f"{p.blkio_write_bps:,} B/s ({p.blkio_write_bps // 1_000_000} MB/s)"),
+        ("Processes", f"{p.device_pids}" + ("" if p.pids_limit else " (from memory)")),
+        ("OOM score adj", str(p.oom_score_adj) if p.oom_score_adj is not None else "default"),
+        ("Share overrides", _shares_text(p.shares) or "none"),
         ("ARM", str(p.is_arm)),
         ("From", _where(p) if p.builtin else f"{_where(p)} ({p.source})"),
     ]
@@ -195,6 +210,15 @@ def switch_cmd(
         Path | None,
         typer.Option("--stack-dir", help="Directory containing the stack's compose file."),
     ] = None,
+    cpu_factor: Annotated[
+        float | None,
+        typer.Option(
+            "--cpu-factor",
+            min=0.01,
+            max=1.0,
+            help="Multiply CPU limits by this. Default: from `p4n4-emu calibrate`.",
+        ),
+    ] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Print the docker update commands only.")
     ] = False,
@@ -207,6 +231,7 @@ def switch_cmd(
     err = Console(stderr=True)
     try:
         prof = load_profile(name)
+        overrides = share_overrides(prof)
     except ValueError as e:
         err.print(f"[red]{e}[/red]")
         raise typer.Exit(1) from e
@@ -245,20 +270,37 @@ def switch_cmd(
                 f"{prof.name} on the next p4n4-emu up.[/dim]"
             )
 
-    shares = {s: stack_shares(s, stack_dir) for s in budget_stacks([s for s, _, _ in running])}
+    shares = {
+        s: stack_shares(s, stack_dir, overrides)
+        for s in budget_stacks([s for s, _, _ in running])
+    }
     scale = budget_scale(shares.values())
     blkio_device = detect_block_device()
 
     failed = False
     for s, cwd, overlay in running:
+        meta = _meta(overlay)
+        factor = resolve_cpu_factor(prof, meta.get("platform"), cpu_factor)
+        # Cores picked with --cpuset auto follow the new profile; a list stays as it was
+        cores = meta.get("cpuset")
+        if cores and meta.get("cpuset_auto"):
+            try:
+                cores = resolve_cpuset("auto", prof, host_cpus())
+            except ValueError as e:
+                err.print(f"[red]{e}[/red]")
+                raise typer.Exit(1) from e
         content = render_overlay(
             prof,
             s,
             blkio_device,
             services=shares[s].keys(),
-            platform=_meta(overlay).get("platform"),
+            platform=meta.get("platform"),
             scale=scale,
-            gpu=_meta(overlay).get("gpu"),
+            gpu=meta.get("gpu"),
+            overrides=overrides,
+            cpu_factor=factor.value,
+            cpuset=cores,
+            cpuset_auto=bool(meta.get("cpuset_auto")),
         )
         expected = expected_limits(yaml.safe_load(content))
         containers = dc.ps(cwd, overlay=existing_overlay(cwd, s))
@@ -295,7 +337,8 @@ def switch_cmd(
 
 
 def update_command(container: str, lim: Limits) -> list[str]:
-    """`docker update` for a container's CPU and memory limits (disk rates can't change)."""
+    """`docker update` for a container's CPU, memory and pids limits and its cores
+    (disk rates can't change)."""
     cmd = ["docker", "update"]
     if lim.cpus is not None:
         cmd += ["--cpus", f"{lim.cpus:.2f}"]
@@ -303,7 +346,18 @@ def update_command(container: str, lim: Limits) -> list[str]:
         cmd += ["--memory", str(lim.memory)]
         # Set together, so lowering memory never leaves swap below it
         cmd += ["--memory-swap", str(lim.memswap if lim.memswap else lim.memory)]
+    if lim.pids is not None:
+        cmd += ["--pids-limit", str(lim.pids)]
+    if lim.cpuset is not None:
+        cmd += ["--cpuset-cpus", lim.cpuset]
     return [*cmd, container]
+
+
+def _shares_text(shares: dict[str, dict[str, float]]) -> str:
+    return ", ".join(
+        f"{svc} " + " ".join(f"{k} {v:g}" for k, v in fields.items())
+        for svc, fields in shares.items()
+    )
 
 
 def _meta(overlay: dict) -> dict:

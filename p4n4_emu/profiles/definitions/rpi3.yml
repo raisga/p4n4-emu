@@ -4,6 +4,8 @@ description: "Raspberry Pi 3 Model B — 1 GB"
 arch: arm64
 board: rpi3
 cpus: 4
+# Single-thread 7-Zip MIPS, Cortex-A53 at 1.2 GHz (sbc-bench "7-zip single", 4hOP)
+cpu_score: 977
 # 1 GB less what the GPU and the OS keep
 memory: "768m"
 memory_swap: "768m"

@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from p4n4_emu.overlays.generator import docker_platform, render_overlay
-from p4n4_emu.profiles.loader import list_profiles, load_profile
+from p4n4_emu.profiles.loader import list_profiles, load_profile, parse_profile
 from p4n4_emu.utils.usage import expected_limits, parse_size
 from tests.conftest import compose_available, stack_dirs
 
@@ -80,6 +80,7 @@ def test_overlay_merges_with_the_real_stack(stack, profile, tmp_path):
         assert float(limits["cpus"]) == pytest.approx(want.cpus), name
         assert int(limits["memory"]) == want.memory, name
         assert parse_size(str(svc["memswap_limit"])) == want.memswap, name
+        assert int(limits["pids"]) == want.pids, name
         assert svc.get("platform") == platform, name
         # Compose's JSON spells these keys Path / Rate
         (read,) = svc["blkio_config"]["device_read_bps"]
@@ -112,3 +113,29 @@ def test_gpu_reservations_merge_with_the_real_stack(stack, tmp_path):
             assert devices == [{"driver": "nvidia", "count": 1, "capabilities": ["gpu"]}], name
         else:
             assert not devices, name
+
+
+@pytest.mark.parametrize("stack", sorted(STACKS))
+def test_cores_and_oom_policy_merge_with_the_real_stack(stack, tmp_path):
+    stack_dir = STACKS[stack]
+    services = _services(stack_dir)
+    prof = parse_profile(
+        {**yaml.safe_load(load_profile("rpi4").source.read_text()), "oom_score_adj": 500},
+        "rpi4",
+    )
+    rendered = render_overlay(
+        prof, stack, None, services=services, platform=None, cpu_factor=0.44, cpuset="0-3",
+    )
+    overlay = tmp_path / f"{stack}.emu.yml"
+    overlay.write_text(rendered)
+    r = subprocess.run(
+        [*_compose(stack_dir, overlay), "config", "--format", "json"],
+        capture_output=True, text=True, check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    expected = expected_limits(yaml.safe_load(rendered))
+    for name, svc in json.loads(r.stdout)["services"].items():
+        assert svc["cpuset"] == "0-3", name
+        assert svc["oom_score_adj"] == 500, name
+        cpus = float(svc["deploy"]["resources"]["limits"]["cpus"])
+        assert cpus == pytest.approx(expected[name].cpus), name

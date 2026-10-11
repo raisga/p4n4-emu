@@ -110,6 +110,9 @@ def cmd(
     for s, _, overlay in stacks:
         if not containers[s]:
             continue
+        cpu_note = _cpu_note(_meta(overlay)) if overlay else ""
+        if cpu_note:
+            console.print(f"[dim]{s}: {cpu_note}[/dim]")
         expected = expected_limits(overlay) if overlay else None
         table, stack_stale = _stack_table(
             s, active.get(s), containers[s], expected, applied, usage
@@ -129,9 +132,23 @@ def cmd(
         )
 
 
+def _meta(overlay: dict | None) -> dict:
+    meta = (overlay or {}).get(META_KEY)
+    return meta if isinstance(meta, dict) else {}
+
+
 def _profile_of(overlay: dict) -> str | None:
-    meta = overlay.get(META_KEY)
-    return meta.get("profile") if isinstance(meta, dict) else None
+    return _meta(overlay).get("profile")
+
+
+def _cpu_note(meta: dict) -> str:
+    """How `up` turned the profile's cores into limits: core speed and pinning."""
+    parts = []
+    if meta.get("cpu_factor"):
+        parts.append(f"CPU limits × {meta['cpu_factor']} for core speed")
+    if meta.get("cpuset"):
+        parts.append(f"pinned to host cores {meta['cpuset']}")
+    return "; ".join(parts)
 
 
 def _print_profile(prof: Profile) -> None:
@@ -295,6 +312,8 @@ def _print_json(
             "stack": s,
             "dir": str(cwd),
             "profile": active.get(s),
+            "cpu_factor": _meta(overlay).get("cpu_factor", 1.0),
+            "cpuset": _meta(overlay).get("cpuset"),
             "services": services,
         })
 

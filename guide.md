@@ -51,6 +51,7 @@ Expected output:
  Usage: p4n4-emu [OPTIONS] COMMAND [ARGS]...
  ...
  Commands:
+   calibrate  Measure a host core, so CPU limits follow core speed.
    down     Stop an emulated stack.
    profile  Inspect hardware profiles.
    setup    Preflight checks and QEMU install.
@@ -86,6 +87,15 @@ The Raspberry Pi profiles run ARM64 images, so on an x86 host install QEMU binfm
 
 ```bash
 p4n4-emu setup --arch arm64
+```
+
+Optionally, measure how fast a host core is, so CPU limits follow the board's core speed
+and not just its core count (a Pi 4 core does less than half the work of a laptop core):
+
+```bash
+p4n4-emu calibrate                    # native images, about a minute
+p4n4-emu calibrate --platform arm64   # images under QEMU, several minutes
+p4n4-emu calibrate --show             # stored scores and each profile's factor
 ```
 
 ---
@@ -394,6 +404,7 @@ p4n4-emu down --stack iot --stack-dir ~/p4n4/stacks/iot --volumes
 # First-time setup
 uv tool install --editable .
 p4n4-emu setup [--arch arm64]
+p4n4-emu calibrate [--platform arm64]   # CPU limits follow core speed
 
 # Inspect profiles
 p4n4-emu profile list

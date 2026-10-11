@@ -5,6 +5,8 @@ arch: arm64
 # (or under QEMU) they run on the CPU. The GPU shares the 8 GB with the CPU
 gpu: nvidia
 cpus: 6
+# Single-thread 7-Zip MIPS, Cortex-A78AE at 1.5 GHz (sbc-bench "7-zip single", 4vy7)
+cpu_score: 2153
 memory: "7168m"
 memory_swap: "7168m"
 blkio_weight: 500

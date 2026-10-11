@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,12 +11,15 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from p4n4_emu.profiles.loader import Profile
+from p4n4_emu.profiles.shares import FALLBACK_KEY, Overrides
 
 _TMPL_DIR = Path(__file__).parent / "templates"
 
 # Docker refuses memory limits below 6 MiB
 _MIN_MEMORY_MB = 6
 _MIN_CPUS = 0.01
+# A service's share of the device's pids, at least this many (a shell and a few threads)
+_MIN_PIDS = 64
 
 
 @dataclass(frozen=True)
@@ -72,12 +77,59 @@ def docker_platform(arch: str) -> str:
         ) from None
 
 
-def service_shares(stack: str, services: Iterable[str] | None = None) -> dict[str, Share]:
-    """Shares for *services* of *stack* (default: the stack's known services)."""
+def _apply(share: Share, fields: dict[str, float] | None) -> Share:
+    if not fields:
+        return share
+    return Share(fields.get("cpu", share.cpu), fields.get("memory", share.memory))
+
+
+def service_shares(
+    stack: str, services: Iterable[str] | None = None, overrides: Overrides | None = None
+) -> dict[str, Share]:
+    """Shares for *services* of *stack* (default: the stack's known services).
+
+    *overrides* (profiles.shares) change a service's share field by field; its
+    "*" entry changes the fallback that services with no default share get.
+    """
+    overrides = overrides or {}
     known = SERVICE_SHARES.get(stack, {})
-    if services is None:
-        return dict(known)
-    return {name: known.get(name, FALLBACK_SHARE) for name in services}
+    fallback = _apply(FALLBACK_SHARE, overrides.get(FALLBACK_KEY))
+    names = known if services is None else services
+    return {
+        name: _apply(known.get(name, fallback), overrides.get(name)) for name in names
+    }
+
+
+_CPUSET = re.compile(r"^\d+(-\d+)?(,\d+(-\d+)?)*$")
+
+
+def resolve_cpuset(spec: str, profile: Profile, host_cpus: int | None) -> str:
+    """The cores to pin every service to: *spec* "auto" means the first ones, as
+    many as the profile has; otherwise a list like "0-3" or "0,2,4,6".
+
+    Raises ValueError when the list is malformed or names cores the host lacks.
+    """
+    if spec == "auto":
+        wanted = math.ceil(profile.cpus)
+        if host_cpus is not None and wanted > host_cpus:
+            raise ValueError(
+                f"{profile.name} has {profile.cpus:g} cores and the host {host_cpus}: "
+                "it can't be pinned to its own cores."
+            )
+        return "0" if wanted == 1 else f"0-{wanted - 1}"
+    spec = spec.replace(" ", "")
+    if not _CPUSET.match(spec):
+        raise ValueError(f"--cpuset: expected auto, or cores such as 0-3 or 0,2,4, got {spec!r}")
+    cores = set()
+    for part in spec.split(","):
+        low, _, high = part.partition("-")
+        first, last = int(low), int(high or low)
+        if last < first:
+            raise ValueError(f"--cpuset: {part} runs backwards")
+        cores.update(range(first, last + 1))
+    if host_cpus is not None and max(cores) >= host_cpus:
+        raise ValueError(f"--cpuset: the host has cores 0-{host_cpus - 1}, not {max(cores)}")
+    return spec
 
 
 @dataclass(frozen=True)
@@ -110,6 +162,10 @@ def render_overlay(
     platform: str | None = "auto",
     scale: Scale | None = None,
     gpu: str | None = None,
+    overrides: Overrides | None = None,
+    cpu_factor: float = 1.0,
+    cpuset: str | None = None,
+    cpuset_auto: bool = False,
 ) -> str:
     """Render a Compose override YAML string for *stack* using *profile*.
 
@@ -122,6 +178,10 @@ def render_overlay(
             own architecture when it is ARM
         scale: per-device budget scale from budget_scale()
         gpu: GPU driver (e.g. "nvidia") whose device GPU_SERVICES reserve, or None
+        overrides: share overrides from the profile and the project (profiles.shares)
+        cpu_factor: board core speed / host core speed (utils.calibration), at most 1
+        cpuset: host cores every service is pinned to (resolve_cpuset), or None
+        cpuset_auto: *cpuset* came from "auto", so `profile switch` recomputes it
     """
     if platform == "auto":
         platform = docker_platform(profile.arch) if profile.is_arm else None
@@ -129,14 +189,17 @@ def render_overlay(
     swap_ratio = profile.memory_swap_bytes / profile.memory_bytes
 
     rendered_services = []
-    for name, share in service_shares(stack, services).items():
+    for name, share in service_shares(stack, services, overrides).items():
         memory_mb = max(_MIN_MEMORY_MB, int(profile.memory_mb * share.memory * scale.memory))
+        cpus = profile.cpus * cpu_factor * share.cpu * scale.cpu
         rendered_services.append(
             {
                 "name": name,
-                "cpus": f"{max(_MIN_CPUS, profile.cpus * share.cpu * scale.cpu):.2f}",
+                "cpus": f"{max(_MIN_CPUS, cpus):.2f}",
                 "memory_mb": memory_mb,
                 "memswap_mb": max(memory_mb, int(memory_mb * swap_ratio)),
+                # Threads cost kernel memory, so pids follow the memory share
+                "pids": max(_MIN_PIDS, int(profile.device_pids * share.memory * scale.memory)),
                 "gpu": gpu if name in GPU_SERVICES else None,
             }
         )
@@ -155,4 +218,7 @@ def render_overlay(
         platform=platform,
         blkio_device=blkio_device,
         gpu=gpu,
+        cpu_factor=cpu_factor,
+        cpuset=cpuset,
+        cpuset_auto=cpuset_auto,
     )
