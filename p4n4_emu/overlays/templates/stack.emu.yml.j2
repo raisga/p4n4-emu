@@ -26,8 +26,10 @@ services: {}
 services:
 {% for svc in services %}
   {{ svc.name }}:
-    {% if platform %}
-    platform: {{ platform }}
+    {% if svc.platform %}
+    platform: {{ svc.platform }}
+    {% elif platform %}
+    # Native: runs as the host's platform, not emulated
     {% endif %}
     deploy:
       resources:

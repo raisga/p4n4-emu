@@ -8,6 +8,7 @@ from p4n4_emu.overlays.generator import (
     Scale,
     budget_scale,
     docker_platform,
+    fixed_warnings,
     render_overlay,
     service_shares,
 )
@@ -208,3 +209,62 @@ def test_dashboard_gets_a_small_limit(rpi5):
 
 def test_budget_never_scales_up():
     assert budget_scale([service_shares("edge")]) == Scale()
+
+
+# ── Fixed-size services (System 1) ────────────────────────────────────────────
+
+AI_WITH_SYSTEM1 = ["ollama", "letta", "n8n", "system1"]
+
+
+def _limits(doc, name):
+    return doc["services"][name]["deploy"]["resources"]["limits"]
+
+
+def test_system1_is_not_a_default_service(rpi5):
+    assert "system1" not in service_shares("ai")
+    assert "system1" not in _parse(render_overlay(rpi5, "ai", None))["services"]
+
+
+def test_system1_gets_its_fixed_size(rpi5):
+    shares = service_shares("ai", AI_WITH_SYSTEM1, profile=rpi5)
+    scale = budget_scale(service_shares(s, AI_WITH_SYSTEM1 if s == "ai" else None, profile=rpi5)
+                         for s in ("iot", "ai", "edge", "dashboard"))
+    doc = _parse(render_overlay(rpi5, "ai", None, services=AI_WITH_SYSTEM1, scale=scale))
+    assert shares["system1"].fixed
+    assert _limits(doc, "system1")["memory"] == "2048m"
+    assert float(_limits(doc, "system1")["cpus"]) == pytest.approx(2.0)
+
+
+def test_other_services_shrink_around_system1(rpi5):
+    stacks = ("iot", "ai", "edge", "dashboard")
+    with_s1 = [service_shares(s, AI_WITH_SYSTEM1 if s == "ai" else None, profile=rpi5)
+               for s in stacks]
+    without = [service_shares(s, profile=rpi5) for s in stacks]
+    scale, plain = budget_scale(with_s1), budget_scale(without)
+    assert scale.memory < plain.memory and scale.cpu < plain.cpu
+    docs = [_parse(render_overlay(rpi5, s, None, services=with_s1[i].keys(), scale=scale))
+            for i, s in enumerate(stacks)]
+    assert _total(docs, "memory") <= rpi5.memory_mb
+    assert _total(docs, "cpus") <= rpi5.cpus + 0.05
+
+
+def test_system1_runs_native_on_an_emulated_board(rpi5):
+    doc = _parse(render_overlay(rpi5, "ai", None, services=AI_WITH_SYSTEM1))
+    assert doc["services"]["ollama"]["platform"] == "linux/arm64"
+    assert "platform" not in doc["services"]["system1"]
+
+
+def test_system1_warnings(rpi5):
+    rpi4, mcu = load_profile("rpi4"), load_profile("mcu-class")
+    for prof, expected in ((rpi5, None), (rpi4, "not recommended"), (mcu, "can't run")):
+        warnings = fixed_warnings(prof, [service_shares("ai", AI_WITH_SYSTEM1, profile=prof)])
+        if expected is None:
+            assert warnings == []
+        else:
+            assert len(warnings) == 1 and expected in warnings[0]
+
+
+def test_system1_share_override_keeps_it_fixed(rpi5):
+    shares = service_shares("ai", ["system1"], {"system1": {"memory": 0.4}}, profile=rpi5)
+    assert shares["system1"].fixed and shares["system1"].memory == 0.4
+

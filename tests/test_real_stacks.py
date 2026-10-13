@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from p4n4_emu.overlays.generator import docker_platform, render_overlay
+from p4n4_emu.overlays.generator import NATIVE_SERVICES, docker_platform, render_overlay
 from p4n4_emu.profiles.loader import list_profiles, load_profile, parse_profile
 from p4n4_emu.utils.usage import expected_limits, parse_size
 from tests.conftest import compose_available, stack_dirs
@@ -81,7 +81,8 @@ def test_overlay_merges_with_the_real_stack(stack, profile, tmp_path):
         assert int(limits["memory"]) == want.memory, name
         assert parse_size(str(svc["memswap_limit"])) == want.memswap, name
         assert int(limits["pids"]) == want.pids, name
-        assert svc.get("platform") == platform, name
+        # System 1 runs native: PyTorch segfaults under QEMU
+        assert svc.get("platform") == (None if name in NATIVE_SERVICES else platform), name
         # Compose's JSON spells these keys Path / Rate
         (read,) = svc["blkio_config"]["device_read_bps"]
         assert read["Path"] == _DEVICE and int(read["Rate"]) == want.read_bps, name

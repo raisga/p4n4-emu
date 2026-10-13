@@ -16,6 +16,7 @@ from p4n4_emu.overlays.generator import (
     Share,
     budget_scale,
     docker_platform,
+    fixed_warnings,
     render_overlay,
     resolve_cpuset,
     service_shares,
@@ -75,12 +76,15 @@ def share_overrides(prof: Profile) -> Overrides:
 
 
 def stack_shares(
-    stack: str, stack_dir: Path | None, overrides: Overrides | None = None
+    stack: str,
+    stack_dir: Path | None,
+    overrides: Overrides | None = None,
+    profile: Profile | None = None,
 ) -> dict[str, Share]:
     """Shares for the services actually defined in *stack*'s compose config."""
     cwd = resolve_stack_dir(stack_dir, stack)
     services = dc.list_services(cwd) if cwd is not None else None
-    return service_shares(stack, services, overrides)
+    return service_shares(stack, services, overrides, profile)
 
 
 def resolve_cpu_factor(prof: Profile, platform: str | None, override: float | None) -> CpuFactor:
@@ -239,8 +243,12 @@ def cmd(
 
     # All stacks of the project run on one device, so their combined limits must
     # fit within the profile even when they are started one at a time.
-    shares = {s: stack_shares(s, stack_dir, overrides) for s in budget_stacks(stacks_to_run)}
+    shares = {
+        s: stack_shares(s, stack_dir, overrides, prof) for s in budget_stacks(stacks_to_run)
+    }
     scale = budget_scale(shares.values())
+    for warning in fixed_warnings(prof, shares.values()):
+        console.print(f"[yellow]Warning:[/yellow] {warning}")
 
     # Resolve every stack before starting any, so a missing one starts nothing
     dirs = []

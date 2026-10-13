@@ -271,7 +271,7 @@ def switch_cmd(
             )
 
     shares = {
-        s: stack_shares(s, stack_dir, overrides)
+        s: stack_shares(s, stack_dir, overrides, prof)
         for s in budget_stacks([s for s, _, _ in running])
     }
     scale = budget_scale(shares.values())
