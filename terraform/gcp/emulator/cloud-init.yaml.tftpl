@@ -1,0 +1,22 @@
+#cloud-config
+# docs/guides/gcp.md, section 4.2
+package_update: true
+packages: [ca-certificates, curl, git, jq]
+
+users:
+  - name: p4n4
+    uid: 2000
+    shell: /bin/bash
+    lock_passwd: true
+
+write_files:
+  - path: /etc/docker/daemon.json
+    content: |
+      { "log-driver": "json-file", "log-opts": { "max-size": "10m", "max-file": "5" } }
+
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker p4n4
+  - su - p4n4 -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+  - su - p4n4 -c 'mkdir -p p4n4/tools && git clone -q --branch ${git_refs.lib} https://github.com/raisga/p4n4-lib p4n4/lib && git clone -q --branch ${git_refs.emu} https://github.com/raisga/p4n4-emu p4n4/tools/emu && git clone -q --branch ${git_refs.templates} https://github.com/raisga/p4n4-templates p4n4/tools/templates'
+  - su - p4n4 -c '~/.local/bin/uv tool install ~/p4n4/tools/emu --with ~/p4n4/lib'

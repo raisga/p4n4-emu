@@ -104,7 +104,7 @@ blkio_weight: 500           # 10–1000 (default 500)
 blkio_read_bps: 400m        # bytes/s, or a size per second
 blkio_write_bps: 300m
 # board: rpi5               # a GPIO header for `p4n4-emu run`: rpi3, rpi4, rpi5, rpi-zero2w
-# gpu: nvidia               # the AI and edge services reserve a GPU
+# gpu: nvidia               # Ollama and the inference runner reserve a GPU
 # cpu_score: 3200           # single-thread 7-Zip MIPS of one core (sbc-bench's "7-zip single")
 # pids_limit: 16384         # processes and threads in all (default: from memory)
 # oom_score_adj: 500        # -1000–1000, for the host's OOM killer
@@ -235,7 +235,27 @@ for. **stale** means it doesn't: it was created before the overlay changed, or w
 Run `p4n4-emu up` again to recreate it. Without cgroup v2, `status` warns that the
 limits are set but not enforced.
 
+To keep a record of a run, `p4n4-emu report` samples usage several times
+(`--samples 5 --interval 2`), and records each container's restarts, OOM kills and exit
+code. It saves `report.json`, a `summary.md` with the issues found and a per-stack table,
+and each container's last `--tail` log lines, all in
+`p4n4-emu-report-<UTC time>.tar.gz` (or `--output out.tar.gz`, or a directory).
+`--label instance-type=m7g.xlarge` adds your own keys to the report, and `--fail-on-issues`
+exits 1 when it finds an error (a container down, unhealthy, OOM-killed or restarted, or
+stale limits), for CI.
+
 ---
+
+## Cloud emulators
+
+To run a project under p4n4-emu on a throwaway cloud VM sized for the profile, for example
+an arm64 Graviton, Axion or Cobalt instance for the Raspberry Pi profiles, see the guides
+for [AWS](https://github.com/raisga/p4n4-docs/blob/main/guides/aws.md),
+[Google Cloud](https://github.com/raisga/p4n4-docs/blob/main/guides/gcp.md),
+[Azure](https://github.com/raisga/p4n4-docs/blob/main/guides/azure.md) and
+[DigitalOcean](https://github.com/raisga/p4n4-docs/blob/main/guides/digitalocean.md).
+[`terraform/`](terraform/README.md) creates the same setup and emulators for the first three,
+one Terraform workspace per run.
 
 ## Development
 
@@ -264,17 +284,20 @@ project's stacks, and `p4n4 down` hands the stacks p4n4-emu started back to
 ```
 p4n4-emu setup [--arch arm64|armv7] [--check-only]
 p4n4-emu calibrate [--platform arm64|armv7] [--score MIPS] [--show] [--json]
-p4n4-emu up    [--profile rpi5] [--stack iot|ai|edge|dashboard|iot,ai|all]
+p4n4-emu up    [--profile rpi5] [--stack iot|ai|extras|dashboard|iot,ai|all]
                [--stack-dir PATH] [--arch arm64|armv7|x86_64 | --native] [--no-gpu]
                [--cpu-factor 0.01–1] [--cpuset auto|LIST]
                [--sim] [--sim-interval 2.0] [--sim-devices 1] [--sim-scenario FILE]
                [--sim-replay FILE]
                [--build] [--pull] [--dry-run]
-p4n4-emu down  [--stack iot|ai|edge|dashboard|iot,ai|all]
+p4n4-emu down  [--stack iot|ai|extras|dashboard|iot,ai|all]
                [--stack-dir PATH] [--volumes] [--yes]
-p4n4-emu status [--profile rpi5] [--stack iot|ai|edge|dashboard|iot,ai|all] [--json]
-p4n4-emu logs  [SERVICE] [--stack iot|ai|edge|dashboard|iot,ai|all]
+p4n4-emu status [--profile rpi5] [--stack iot|ai|extras|dashboard|iot,ai|all] [--json]
+p4n4-emu logs  [SERVICE] [--stack iot|ai|extras|dashboard|iot,ai|all]
                [--stack-dir PATH] [--tail 100] [--no-follow]
+p4n4-emu report [--stack iot|ai|extras|dashboard|iot,ai|all] [--stack-dir PATH]
+                [--output PATH] [--samples 5] [--interval 2.0] [--tail 500]
+                [--label KEY=VALUE ...] [--fail-on-issues]
 p4n4-emu profile list [--json]
 p4n4-emu profile show <name> [--json]
 p4n4-emu profile validate [NAME|FILE ...] [--json]
@@ -473,8 +496,9 @@ three features below.
 
 A measurement with a `kind` is a media feed for the edge runner. Each reading is one frame
 or one audio window, published as `{"values": [...]}`, the feature vector `ei-runner`
-classifies. Point the edge stack's `MQTT_TOPIC_INPUT` at it (`sensors/+/camera`). Node-RED
-stores nothing of these payloads, since InfluxDB gets no arrays.
+classifies. Point the runner's `MQTT_TOPIC_INPUT` (the ai stack's `.env`) at it
+(`sensors/+/camera`). Node-RED stores nothing of these payloads, since InfluxDB gets no
+arrays.
 
 ```yaml
 measurements:

@@ -90,7 +90,7 @@ def test_overlay_merges_with_the_real_stack(stack, profile, tmp_path):
         assert svc.get("image") or svc.get("build"), name
 
 
-@pytest.mark.parametrize("stack", sorted(s for s in STACKS if s in ("ai", "edge")))
+@pytest.mark.parametrize("stack", sorted(s for s in STACKS if s == "ai"))
 def test_gpu_reservations_merge_with_the_real_stack(stack, tmp_path):
     stack_dir = STACKS[stack]
     services = _services(stack_dir)

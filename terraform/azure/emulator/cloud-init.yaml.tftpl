@@ -1,0 +1,43 @@
+#cloud-config
+# docs/guides/azure.md, section 4.2
+package_update: true
+packages: [ca-certificates, curl, git, jq]
+
+write_files:
+  - path: /etc/docker/daemon.json
+    content: |
+      { "log-driver": "json-file", "log-opts": { "max-size": "10m", "max-file": "5" } }
+  - path: /usr/local/bin/p4n4-ttl
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # The run's time to live: delete this VM's resource group, and everything in it
+      set -eu
+      imds=http://169.254.169.254/metadata
+      token=$(curl -sf -H Metadata:true \
+        "$imds/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/" | jq -r .access_token)
+      rg=$(curl -sf -H Metadata:true "$imds/instance/compute?api-version=2021-02-01" \
+        | jq -r '"/subscriptions/\(.subscriptionId)/resourceGroups/\(.resourceGroupName)"')
+      curl -sf -X DELETE -H "Authorization: Bearer $token" "https://management.azure.com$rg?api-version=2021-04-01"
+  - path: /etc/systemd/system/p4n4-ttl.service
+    content: |
+      [Unit]
+      Description=p4n4 emulator TTL: delete this VM's resource group
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/p4n4-ttl
+      Restart=on-failure
+      RestartSec=60
+
+runcmd:
+  - printf '[Timer]\nOnCalendar=%s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' "$(date -u -d '+${ttl_minutes} min' '+%Y-%m-%d %H:%M:%S UTC')" > /etc/systemd/system/p4n4-ttl.timer
+  - systemctl daemon-reload
+  - systemctl enable --now p4n4-ttl.timer
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker p4n4
+  - su - p4n4 -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+  - su - p4n4 -c 'mkdir -p p4n4/tools && git clone -q --branch ${git_refs.lib} https://github.com/raisga/p4n4-lib p4n4/lib && git clone -q --branch ${git_refs.emu} https://github.com/raisga/p4n4-emu p4n4/tools/emu && git clone -q --branch ${git_refs.templates} https://github.com/raisga/p4n4-templates p4n4/tools/templates'
+  - su - p4n4 -c '~/.local/bin/uv tool install ~/p4n4/tools/emu --with ~/p4n4/lib'

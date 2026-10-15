@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
+
+_SYS_BLOCK = Path("/sys/dev/block")  # <major>:<minor> → the device's sysfs directory
+_DEV = Path("/dev")
 
 
 def _docker_root() -> str | None:
@@ -58,7 +62,23 @@ def _resolve_device(path: str) -> str | None:
         return base
     if Path(device).exists():
         return device
-    return None
+    return _device_by_number(path)
+
+
+def _device_by_number(path: str) -> str | None:
+    """The disk holding *path*, found by its device number in /sys/dev/block.
+
+    For a root filesystem that /proc/mounts lists under a name with no device
+    node, such as `/dev/root` on Ubuntu's cloud images (EC2, GCP).
+    """
+    try:
+        dev = os.stat(path).st_dev
+        node = (_SYS_BLOCK / f"{os.major(dev)}:{os.minor(dev)}").resolve(strict=True)
+    except OSError:
+        return None
+    disk = node.parent if (node / "partition").exists() else node
+    candidate = _DEV / disk.name
+    return str(candidate) if candidate.exists() else None
 
 
 def detect_block_device() -> str | None:

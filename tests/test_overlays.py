@@ -86,7 +86,7 @@ def test_iot_overlay_no_platform_for_x86(mcu):
 
 def test_ai_overlay_services(rpi5):
     doc = _parse(render_overlay(rpi5, "ai", None))
-    assert set(doc["services"].keys()) == {"ollama", "letta", "n8n"}
+    assert set(doc["services"].keys()) == {"ollama", "letta", "n8n", "ei-runner"}
 
 
 def test_ai_overlay_ollama_gets_most_cpu(rpi5):
@@ -96,11 +96,22 @@ def test_ai_overlay_ollama_gets_most_cpu(rpi5):
     assert ollama_cpu > n8n_cpu
 
 
-# ── Edge stack ────────────────────────────────────────────────────────────────
+def test_ai_overlay_limits_the_inference_runner_as_the_edge_stack_did(rpi5):
+    ai = _parse(render_overlay(rpi5, "ai", None))["services"]["ei-runner"]
+    edge = _parse(render_overlay(rpi5, "edge", None))["services"]["ei-runner"]
+    assert ai["deploy"] == edge["deploy"]
+
+
+# ── Legacy edge layer (projects from before it merged into ai) ────────────────
 
 def test_edge_overlay_services(rpi5):
     doc = _parse(render_overlay(rpi5, "edge", None))
     assert "ei-runner" in doc["services"]
+
+
+def test_extras_services_get_the_fallback_share(rpi5):
+    doc = _parse(render_overlay(rpi5, "extras", None, services=["video"]))
+    assert "video" in doc["services"]
 
 
 # ── Cross-profile ─────────────────────────────────────────────────────────────
@@ -193,7 +204,7 @@ def _total(docs: list[dict], key: str) -> float:
 
 
 def test_budget_keeps_all_stacks_within_one_device(rpi5):
-    stacks = ("iot", "ai", "edge", "dashboard")
+    stacks = ("iot", "ai", "extras", "dashboard")
     scale = budget_scale(service_shares(s) for s in stacks)
     docs = [_parse(render_overlay(rpi5, s, None, scale=scale)) for s in stacks]
     assert _total(docs, "cpus") <= rpi5.cpus + 0.05  # rounding to 2 decimals
@@ -208,7 +219,7 @@ def test_dashboard_gets_a_small_limit(rpi5):
 
 
 def test_budget_never_scales_up():
-    assert budget_scale([service_shares("edge")]) == Scale()
+    assert budget_scale([service_shares("dashboard")]) == Scale()
 
 
 # ── Fixed-size services (System 1) ────────────────────────────────────────────
@@ -228,7 +239,7 @@ def test_system1_is_not_a_default_service(rpi5):
 def test_system1_gets_its_fixed_size(rpi5):
     shares = service_shares("ai", AI_WITH_SYSTEM1, profile=rpi5)
     scale = budget_scale(service_shares(s, AI_WITH_SYSTEM1 if s == "ai" else None, profile=rpi5)
-                         for s in ("iot", "ai", "edge", "dashboard"))
+                         for s in ("iot", "ai", "extras", "dashboard"))
     doc = _parse(render_overlay(rpi5, "ai", None, services=AI_WITH_SYSTEM1, scale=scale))
     assert shares["system1"].fixed
     assert _limits(doc, "system1")["memory"] == "2048m"
@@ -236,7 +247,7 @@ def test_system1_gets_its_fixed_size(rpi5):
 
 
 def test_other_services_shrink_around_system1(rpi5):
-    stacks = ("iot", "ai", "edge", "dashboard")
+    stacks = ("iot", "ai", "extras", "dashboard")
     with_s1 = [service_shares(s, AI_WITH_SYSTEM1 if s == "ai" else None, profile=rpi5)
                for s in stacks]
     without = [service_shares(s, profile=rpi5) for s in stacks]

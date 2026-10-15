@@ -116,7 +116,7 @@ def cmd(
         typer.Option(
             "--stack",
             "-s",
-            help="Stack(s): iot, ai, edge, comma-separated, or all. "
+            help="Stack(s): iot, ai, extras, comma-separated, or all. "
             "Default: the current p4n4 project's enabled stacks (or iot).",
         ),
     ] = None,
@@ -265,6 +265,10 @@ def cmd(
     broker_info: Broker | None = None
     started: list[tuple[str, Path]] = []  # stacks this run started, to roll back
     for s, cwd in dirs:
+        if dc.list_services(cwd) == []:
+            # Compose fails with "no service selected": an extras layer starts empty
+            console.print(f"[dim]Skipping {s}: no services enabled (COMPOSE_PROFILES).[/dim]")
+            continue
         overlay_content = render_overlay(
             prof,
             s,

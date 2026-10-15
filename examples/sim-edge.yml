@@ -25,7 +25,7 @@ devices:
     mcu: {type: esp32-c3, firmware: 0.9.0, sleep: 300, boot: 2}
 
   # A camera and a microphone for ei-runner: point MQTT_TOPIC_INPUT at
-  # sensors/+/camera (or sensors/+/mic) in the edge stack
+  # sensors/+/camera (or sensors/+/mic) in the ai stack's .env
   - id: cam-door
     interval: 2
     measurements:

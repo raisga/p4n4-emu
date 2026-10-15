@@ -20,12 +20,13 @@ import json
 from pathlib import Path
 
 from p4n4_lib import layout, manifest
-from p4n4_lib.layers import LAYER_NAMES
+from p4n4_lib.layers import LEGACY_LAYERS
 
 # Base file names in the order Docker Compose looks for them
 COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
-# Dependency order: the dashboard starts last
-STACKS = LAYER_NAMES
+# Every stack p4n4 runs, in dependency order (the dashboard starts last), including
+# legacy ones that projects made before still run (edge, now ai's ei-runner profile)
+STACKS = layout.ORDER
 
 
 def find_compose_file(directory: Path) -> Path | None:
@@ -56,7 +57,8 @@ def expand_stacks(stack: str | None, start: Path | None = None) -> list[str]:
     Turn the --stack option into a list of stack names.
 
     None or "all" resolve to the current p4n4 project's enabled layers when a
-    manifest is found; otherwise None defaults to iot and "all" to every stack.
+    manifest is found; otherwise None defaults to iot and "all" to every current
+    stack (not the legacy ones).
     Explicit values may be comma-separated.
     """
     if stack not in (None, "all"):
@@ -66,12 +68,17 @@ def expand_stacks(stack: str | None, start: Path | None = None) -> list[str]:
         enabled = manifest_layers(manifest)
         if enabled:
             return enabled
-    return list(STACKS) if stack == "all" else ["iot"]
+    return [s for s in STACKS if s not in LEGACY_LAYERS] if stack == "all" else ["iot"]
 
 
 def resolve_stack_dir(base: Path | None, stack: str, start: Path | None = None) -> Path | None:
-    """Directory holding the given stack's compose file, or None."""
+    """Directory holding the given stack's compose file, or None.
+
+    Always absolute: Compose runs in this directory with `-f` paths built from it,
+    so a relative `--stack-dir iot` would otherwise point at `iot/iot/`.
+    """
     if base is not None:
+        base = base.resolve()
         for candidate in (base / stack, base):
             if find_compose_file(candidate):
                 return candidate

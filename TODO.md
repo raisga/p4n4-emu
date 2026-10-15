@@ -151,7 +151,7 @@ Line numbers below refer to the code before the fix.
       with `--no-gpu`. `profile switch` can't add or drop reservations (next `up` does).
       Checked with `docker compose config` against the real ai and edge stacks.
 - [ ] Accelerator profiles for the edge runner (Coral, Hailo): stub device plus a latency
-      model. Deferred: `stacks/edge/runner` has no hook for one (backends are eim / onnx /
+      model. Deferred: `stacks/ai/runner` (formerly `stacks/edge/runner`) has no hook for one (backends are eim / onnx /
       mock). Options: an env-driven latency model in the runner that the overlay sets, or
       `tflite_runtime` / pycoral / `hailo_platform` stubs for `p4n4-emu run` scripts.
 - [x] Document `mcu-class` (kept the name): its description, the profile file and the

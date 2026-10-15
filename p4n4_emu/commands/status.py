@@ -47,7 +47,7 @@ def cmd(
         typer.Option(
             "--stack",
             "-s",
-            help="Stack(s) to query: iot, ai, edge, comma-separated, or all. "
+            help="Stack(s) to query: iot, ai, extras, comma-separated, or all. "
             "Default: the current p4n4 project's enabled stacks (or iot).",
         ),
     ] = None,
@@ -67,22 +67,9 @@ def cmd(
             Console(stderr=True).print(f"[red]{e}[/red]")
             raise typer.Exit(1) from e
 
-    stacks = []  # (stack, compose dir, overlay dict or None)
-    for s in expand_stacks(stack):
-        cwd = resolve_stack_dir(stack_dir, s)
-        if cwd is None:
-            continue
-        overlay_file = existing_overlay(cwd, s)
-        stacks.append((s, cwd, read_overlay(overlay_file) if overlay_file else None))
-
-    active = {s: _profile_of(overlay) for s, _, overlay in stacks if overlay}
+    stacks, active, containers = collect(stack, stack_dir)
     shown = [profile] if profile else sorted(set(filter(None, active.values())))
-    containers = {s: dc.ps(cwd, overlay=existing_overlay(cwd, s)) for s, cwd, _ in stacks}
-    names = [c["Name"] for svcs in containers.values() for c in svcs if c.get("Name")]
-    running = [
-        c["Name"] for svcs in containers.values() for c in svcs
-        if c.get("Name") and c.get("State") == "running"
-    ]
+    names, running = container_names(containers)
     applied = applied_limits(names)
     usage = live_usage(running)
 
@@ -130,6 +117,34 @@ def cmd(
             "[yellow]Warning:[/yellow] cgroup v2 not detected: CPU and memory limits apply, "
             "but disk limits only throttle direct I/O, so buffered writes run unthrottled."
         )
+
+
+def collect(
+    stack: str | None, stack_dir: Path | None
+) -> tuple[list[tuple[str, Path, dict | None]], dict[str, str | None], dict[str, list[dict]]]:
+    """The selected stacks (with their compose dir and overlay), the profile each one
+    runs under, and each one's containers as `docker compose ps` lists them."""
+    stacks = []  # (stack, compose dir, overlay dict or None)
+    for s in expand_stacks(stack):
+        cwd = resolve_stack_dir(stack_dir, s)
+        if cwd is None:
+            continue
+        overlay_file = existing_overlay(cwd, s)
+        stacks.append((s, cwd, read_overlay(overlay_file) if overlay_file else None))
+
+    active = {s: _profile_of(overlay) for s, _, overlay in stacks if overlay}
+    containers = {s: dc.ps(cwd, overlay=existing_overlay(cwd, s)) for s, cwd, _ in stacks}
+    return stacks, active, containers
+
+
+def container_names(containers: dict[str, list[dict]]) -> tuple[list[str], list[str]]:
+    """Every container's name, and the running ones'."""
+    names = [c["Name"] for svcs in containers.values() for c in svcs if c.get("Name")]
+    running = [
+        c["Name"] for svcs in containers.values() for c in svcs
+        if c.get("Name") and c.get("State") == "running"
+    ]
+    return names, running
 
 
 def _meta(overlay: dict | None) -> dict:
@@ -278,6 +293,19 @@ def _print_json(
     usage: dict[str, Usage],
 ) -> None:
     """Everything the tables show, as one JSON document on stdout."""
+    doc = status_document(stacks, active, shown, containers, applied, usage)
+    typer.echo(json.dumps(doc, indent=2, ensure_ascii=False))
+
+
+def status_document(
+    stacks: list[tuple[str, Path, dict | None]],
+    active: dict[str, str | None],
+    shown: list[str],
+    containers: dict[str, list[dict]],
+    applied: dict[str, Limits],
+    usage: dict[str, Usage],
+) -> dict:
+    """What `status --json` prints: profiles, and each stack's services against limits."""
     profiles = {}
     for name in shown:
         try:
@@ -317,12 +345,12 @@ def _print_json(
             "services": services,
         })
 
-    typer.echo(json.dumps({
+    return {
         "profiles": profiles,
         "stacks": out_stacks,
         "stale": stale,
         "cgroup_v2": cgroup_v2(),
-    }, indent=2, ensure_ascii=False))
+    }
 
 
 def _port_list(svc: dict) -> list[dict]:

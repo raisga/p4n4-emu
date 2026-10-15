@@ -58,7 +58,10 @@ SERVICE_SHARES: dict[str, dict[str, Share]] = {
         "ollama": Share(0.60, 0.55),
         "letta": Share(0.20, 0.20),
         "n8n": Share(0.20, 0.15),
+        # The edge inference runner (profile ei-runner)
+        "ei-runner": Share(0.25, 0.10),
     },
+    # The same runner in projects made before the edge layer merged into ai
     "edge": {
         "ei-runner": Share(0.25, 0.10),
     },
@@ -234,7 +237,7 @@ def render_overlay(
 
     Args:
         profile: loaded hardware profile
-        stack: one of "iot", "ai", "edge", "dashboard"
+        stack: one of "iot", "ai", "extras", "dashboard" (or a legacy "edge")
         blkio_device: block device path (e.g. "/dev/sda") or None to skip blkio limits
         services: service names in the stack's compose config; None uses the defaults
         platform: Docker platform to force, None for native, "auto" for the profile's

@@ -1,6 +1,7 @@
 """Tests for stack directory resolution (flat, multi-layer, and bare layouts)."""
 
 import json
+from pathlib import Path
 
 from p4n4_emu.utils.project import (
     expand_stacks,
@@ -63,12 +64,13 @@ def test_expand_default_uses_project_layers(tmp_path):
 
 def test_expand_default_without_project(tmp_path):
     assert expand_stacks(None, tmp_path) == ["iot"]
-    assert expand_stacks("all", tmp_path) == ["iot", "ai", "edge", "dashboard"]
+    # Every current stack: not the legacy edge one
+    assert expand_stacks("all", tmp_path) == ["iot", "ai", "extras", "dashboard"]
 
 
 def test_expand_explicit_and_comma_separated(tmp_path):
     _make_multi_project(tmp_path)
-    assert expand_stacks("edge", tmp_path) == ["edge"]
+    assert expand_stacks("extras", tmp_path) == ["extras"]
     assert expand_stacks("iot,ai", tmp_path) == ["iot", "ai"]
 
 
@@ -101,7 +103,7 @@ def test_resolve_flat_project_rejects_other_stacks(tmp_path):
 
 def test_resolve_disabled_layer_is_none(tmp_path):
     _make_multi_project(tmp_path, ("iot", "ai"))
-    assert resolve_stack_dir(None, "edge", tmp_path) is None
+    assert resolve_stack_dir(None, "extras", tmp_path) is None
 
 
 def test_resolve_explicit_base_prefers_stack_subdir(tmp_path):
@@ -110,6 +112,18 @@ def test_resolve_explicit_base_prefers_stack_subdir(tmp_path):
     (tmp_path / "ai" / "docker-compose.yml").touch()
     assert resolve_stack_dir(tmp_path, "ai", tmp_path) == tmp_path / "ai"
     assert resolve_stack_dir(tmp_path, "iot", tmp_path) == tmp_path
+
+
+def test_resolve_relative_base_is_absolute(tmp_path, monkeypatch):
+    """`--stack-dir iot` from the parent: Compose runs in iot/, so its -f paths must be absolute."""
+    from p4n4_emu.utils.compose import compose_cmd
+
+    (tmp_path / "iot").mkdir()
+    (tmp_path / "iot" / "docker-compose.yml").touch()
+    monkeypatch.chdir(tmp_path)
+    cwd = resolve_stack_dir(Path("iot"), "iot")
+    assert cwd == tmp_path / "iot"
+    assert compose_cmd(cwd)[-1] == str(tmp_path / "iot" / "docker-compose.yml")
 
 
 def test_resolve_bare_checkout_fallbacks(tmp_path):

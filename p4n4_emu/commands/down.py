@@ -31,7 +31,7 @@ def cmd(
         typer.Option(
             "--stack",
             "-s",
-            help="Stack(s) to stop: iot, ai, edge, comma-separated, or all. "
+            help="Stack(s) to stop: iot, ai, extras, comma-separated, or all. "
             "Default: the current p4n4 project's enabled stacks (or iot).",
         ),
     ] = None,

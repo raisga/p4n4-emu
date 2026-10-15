@@ -15,7 +15,8 @@ P4N4_ROOT = Path(os.environ.get("P4N4_ROOT", Path(__file__).resolve().parents[3]
 def stack_dirs() -> dict[str, Path]:
     """Checkouts of the real stacks, by stack name; missing ones are left out."""
     stacks = Path(os.environ.get("P4N4_STACKS_DIR", P4N4_ROOT / "stacks"))
-    dirs = {name: stacks / name for name in ("iot", "ai", "edge")}
+    # p4n4-extras ships no services (only a template), so there's no overlay to merge
+    dirs = {name: stacks / name for name in ("iot", "ai")}
     dirs["dashboard"] = Path(os.environ.get("P4N4_DASHBOARD_DIR", P4N4_ROOT / "dashboard"))
     return {name: d for name, d in dirs.items() if (d / "docker-compose.yml").exists()}
 

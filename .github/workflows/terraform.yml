@@ -1,0 +1,33 @@
+name: Terraform
+
+on:
+  push:
+    branches: [main]
+    paths: ["terraform/**", ".github/workflows/terraform.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["terraform/**", ".github/workflows/terraform.yml"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive terraform
+      - name: Validate every module
+        run: |
+          for dir in terraform/*/shared terraform/*/emulator; do
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+          done
+      # Mock providers: no cloud credentials. The workspace is the run's name.
+      - name: Test the emulator modules
+        env:
+          TF_WORKSPACE: rpi5-20261015-1430
+        run: |
+          for dir in terraform/*/emulator; do
+            terraform -chdir="$dir" test
+          done

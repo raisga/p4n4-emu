@@ -1,0 +1,19 @@
+# Providers and modules that terraform init downloads
+.terraform/
+
+# State lives in the cloud (see README); a local copy here is a mistake or the shared module's
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+
+# Written per checkout from the shared module's output
+backend.hcl
+
+# Local overrides, e.g. backend_override.tf to move the shared module's state
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+crash.log
+crash.*.log

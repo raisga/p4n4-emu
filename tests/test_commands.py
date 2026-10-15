@@ -612,11 +612,11 @@ def test_sim_start_options_override_the_project_broker(monkeypatch):
 
 @pytest.fixture
 def multi_project(tmp_path, monkeypatch):
-    """A multi-layer project (iot, ai, edge) whose ai stack fails to start."""
+    """A multi-layer project (iot, ai, extras) whose ai stack fails to start."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("COMPOSE_FILE", raising=False)
-    (tmp_path / ".p4n4.json").write_text('{"project": "p", "layers": ["iot", "ai", "edge"]}')
-    for name in ("iot", "ai", "edge"):
+    (tmp_path / ".p4n4.json").write_text('{"project": "p", "layers": ["iot", "ai", "extras"]}')
+    for name in ("iot", "ai", "extras"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "docker-compose.yml").write_text("services:\n  svc: {}\n")
     monkeypatch.setattr(paths, "OVERLAY_ROOT", tmp_path / "overlays")
@@ -642,7 +642,7 @@ def test_up_rolls_back_stacks_it_started(multi_project, monkeypatch):
     monkeypatch.setattr(up.dc, "ps", lambda cwd, overlay=None: [])
     result = runner.invoke(app, ["up", "--native", "--stack", "all"])
     assert result.exit_code == 1
-    # ai failed half-way: it and iot go down, dependents first; edge never starts
+    # ai failed half-way: it and iot go down, dependents first; extras never starts
     assert events == [("up", "iot"), ("up", "ai"), ("down", "ai"), ("down", "iot")]
     assert paths.existing_overlay(root / "iot", "iot") is None
 
@@ -661,11 +661,35 @@ def test_up_rollback_keeps_stacks_that_were_running(multi_project, monkeypatch):
 
 def test_up_missing_stack_starts_nothing(multi_project, monkeypatch):
     root, events = multi_project
-    (root / "edge" / "docker-compose.yml").unlink()
+    (root / "extras" / "docker-compose.yml").unlink()
     monkeypatch.setattr(up.dc, "ps", lambda cwd, overlay=None: [])
-    result = runner.invoke(app, ["up", "--native", "--stack", "iot,edge"])
+    result = runner.invoke(app, ["up", "--native", "--stack", "iot,extras"])
     assert result.exit_code == 1
     assert events == []
+
+
+def test_up_skips_a_stack_with_nothing_enabled(multi_project, monkeypatch):
+    # An extras layer starts with COMPOSE_PROFILES empty: Compose would fail on it
+    root, events = multi_project
+    monkeypatch.setattr(up.dc, "ps", lambda cwd, overlay=None: [])
+    monkeypatch.setattr(
+        up.dc, "list_services", lambda cwd: [] if cwd.name == "extras" else ["svc"]
+    )
+    result = runner.invoke(app, ["up", "--native", "--stack", "iot,extras"])
+    assert result.exit_code == 0, result.output
+    assert events == [("up", "iot")]
+    assert "Skipping extras" in result.output
+
+
+def test_up_still_runs_a_legacy_edge_layer(multi_project, monkeypatch):
+    # A project from before the edge layer merged into ai
+    root, events = multi_project
+    (root / "extras").rename(root / "edge")
+    (root / ".p4n4.json").write_text('{"project": "p", "layers": ["iot", "edge"]}')
+    monkeypatch.setattr(up.dc, "ps", lambda cwd, overlay=None: [])
+    result = runner.invoke(app, ["up", "--native"])
+    assert result.exit_code == 0, result.output
+    assert events == [("up", "iot"), ("up", "edge")]
 
 
 def test_setup_skips_install_when_qemu_is_available(monkeypatch):

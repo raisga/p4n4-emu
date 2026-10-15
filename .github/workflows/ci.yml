@@ -51,7 +51,6 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/raisga/p4n4-iot.git "$P4N4_STACKS_DIR/iot"
           git clone --depth 1 https://github.com/raisga/p4n4-ai.git "$P4N4_STACKS_DIR/ai"
-          git clone --depth 1 https://github.com/raisga/p4n4-edge.git "$P4N4_STACKS_DIR/edge"
           git clone --depth 1 https://github.com/raisga/p4n4-dashboard.git "$P4N4_DASHBOARD_DIR"
       - run: pytest --cov=p4n4_emu --cov-report=term-missing
 
