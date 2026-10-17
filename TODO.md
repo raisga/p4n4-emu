@@ -1,13 +1,19 @@
 # TODO — p4n4-emu
 
 Pending work to turn `p4n4-emu` from a resource-limit overlay into an emulator that
-behaves like the edge hardware p4n4 runs on. Written 2026-10-01 against `87a896c`
-plus the uncommitted topic-scheme change (`sensors/<device-id>/<measurement>`).
+behaves like the edge hardware p4n4 runs on. Written 2026-10-01 against `87a896c`; last
+updated 2026-10-16 (`55f3b9e`, version 0.1.0, not on PyPI yet).
 
-**What works today:** profile loading (`rpi4`, `rpi5`, `nuc`, `mcu-class`), per-stack
-Compose overlays (CPU / memory / blkio), p4n4 project discovery (flat and multi-layer),
-QEMU binfmt setup, the MQTT sensor simulator, and the `RPi.GPIO` / I2C / SPI / UART stubs.
-The 89 unit tests pass.
+**What works today:** seven profiles (`rpi-zero2w`, `rpi3`, `rpi4`, `rpi5`,
+`jetson-orin-nano`, `nuc`, `mcu-class`) plus your own, Compose overlays generated from each
+stack's config (CPU with a calibrated core-speed factor, cpuset, memory, pids, blkio, a GPU
+for the Jetson), p4n4 project discovery through p4n4-lib 0.4 (the ai layer's runner and a
+legacy edge layer included), QEMU binfmt setup, `status` / `logs` / `profile switch` /
+`report`, the sensor simulator (scenarios, faults, replays, media feeds, firmware-like
+devices, broker login and TLS), `p4n4-emu run` with stubs for every Pi GPIO library and
+register-level sensors, and Terraform for cloud emulators on AWS, Google Cloud and Azure.
+624 tests pass, 4 skipped (2026-10-16, with p4n4-lib 0.4.0; a `.venv` still on p4n4-lib
+0.2.0 can't import the tests: reinstall it).
 
 Priorities: **P0** gives wrong results or breaks a run · **P1** needed for realistic
 emulation · **P2** quality-of-life · **P3** stretch.
@@ -28,6 +34,11 @@ emulation · **P2** quality-of-life · **P3** stretch.
       resolution stays in emu, because `p4n4_lib.layout` only knows `docker-compose.yml`.
       `ensure_network` and the `p4n4-net` subnet move to it once a lib release includes
       `compose.ensure_network` with the recreate-when-unused fix (section 6).
+- [ ] Use `p4n4_lib.compose.ensure_network` and `layout.network_subnet()` instead of
+      `utils/compose.py`'s own `ensure_network`. Unblocked: p4n4-lib 0.4.0 has the
+      recreate-when-unused fix, and 0.4.1 (unreleased) reads `P4N4_SUBNET`. Until then emu
+      creates `p4n4-net` from the stack's compose config, so the subnet already follows
+      `P4N4_SUBNET` here.
 
 ## 1. Correctness bugs (P0) — fixed 2026-10-01
 
@@ -325,6 +336,17 @@ Line numbers below refer to the code before the fix.
       89 MiB, below what they use (InfluxDB alone used 137 MiB on a workstation), so
       expect OOM kills (see section 3, `mcu-class`). Not yet run green: the dev
       host had a p4n4 project running.
+- [x] **The weekly integration job failed on GitHub's runners** (2026-10-12, x86 and native
+      arm64): the iot stack didn't start, with `io.max: no such device`. `/dev/root` there
+      is a link to the root partition, which the name-based detection kept as is, so Docker
+      set the disk limit on the partition's numbers (8:1); `io.max` only takes whole disks.
+      `utils/docker_info.py` now resolves the device by number through `/sys/dev/block` to
+      its whole disk, and skips disk limits when that fails instead of guessing
+      (`tests/test_docker_info.py`, with the runner's case).
+  - [ ] Confirm it on GitHub: run the integration job (`workflow_dispatch`) after pushing.
+        The fix matches the log, but hasn't run on a runner yet.
+- [ ] Re-run CI for `55f3b9e`: it failed on 2026-10-15 only because p4n4-lib 0.4.0 wasn't on
+      PyPI yet (`pip install -e ".[dev]"`); it is now (`gh run rerun 38822642386`).
 - [x] Regression tests for every P0 bug in section 1.
 - [x] GitHub Actions (`.github/workflows/ci.yml`): `ruff check` + pytest on 3.11–3.13 with the
       stack repos cloned for the compose tests. The integration job runs on demand
@@ -343,10 +365,28 @@ Line numbers below refer to the code before the fix.
 - [ ] Publish `p4n4-emu` to PyPI next to `p4n4-lib`. Ready: `.github/workflows/publish.yml`
       (on a GitHub release, trusted publishing, checks the tag and the wheel's data files) and
       the package metadata. Left: create the `pypi` environment and the PyPI trusted
-      publisher, then tag `v0.1.0` so the image and the package go out together.
+      publisher, then publish a GitHub release. The `v0.1.0` tag already exists (on
+      `cbe4dea`, 2026-10-10) and published the sensor-simulator image as `:0.1.0`, but has no
+      release, so nothing reached PyPI; the code has moved on a lot since, so release a new
+      version (e.g. 0.2.0) rather than that tag.
 - [x] Document how faithful each limit is (what is enforced and what is approximated) and how
       profile numbers were chosen (README, "How faithful the emulation is"). The cgroup v1
       warnings now say what v1 actually loses (buffered-write throttling, swap accounting).
 - [x] Docs page: `docs/reference/emulator.md` (p4n4-docs, formerly `web/docs`) is brought up to
       date and linked from the main README's Quick Start; `cli-reference.md` documents
-      `p4n4 up --emu`.
+      `p4n4 up --emu`. Synced again on 2026-10-16 (profiles, calibrate, scenarios, stubs).
+
+## 9. Reports and cloud emulators (P2) — added 2026-10-15
+
+- [x] `p4n4-emu report`: samples usage (`--samples`, `--interval`), lists errors (not
+      running, unhealthy, OOM-killed, restarted, stale limits) and warnings (a peak at 90%
+      of a limit), and writes `report.json`, `summary.md` and each container's last log
+      lines to a `.tar.gz`; `--fail-on-issues` exits 1 on an error, `--label` records where
+      it ran (`tests/test_report.py`).
+- [x] Terraform under `terraform/` for AWS (EC2 Graviton, SSM, S3), Google Cloud (C4A Axion,
+      IAP, GCS) and Azure (Cobalt 100, a resource group per run): a `shared` module per
+      account and an `emulator` module per run, with the instance deleting itself at its TTL.
+      The `Terraform` workflow checks formatting and validates every module.
+- [ ] Apply each cloud's modules end to end against a real account and compare with the
+      guides (p4n4-docs `guides/aws.md`, `gcp.md`, `azure.md`); CI only validates them.
+- [ ] Terraform for DigitalOcean: its guide (`guides/digitalocean.md`) is manual only.

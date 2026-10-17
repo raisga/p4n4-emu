@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 from pathlib import Path
 
@@ -56,29 +55,38 @@ def _resolve_device(path: str) -> str | None:
     if not device or not device.startswith("/dev/"):
         return None
 
-    # Strip partition number to get the base block device (e.g. /dev/sda1 → /dev/sda)
-    base = re.sub(r"p?\d+$", "", device)
-    if Path(base).exists():
-        return base
-    if Path(device).exists():
-        return device
-    return _device_by_number(path)
-
-
-def _device_by_number(path: str) -> str | None:
-    """The disk holding *path*, found by its device number in /sys/dev/block.
-
-    For a root filesystem that /proc/mounts lists under a name with no device
-    node, such as `/dev/root` on Ubuntu's cloud images (EC2, GCP).
-    """
+    # By device number, not by name: io.max only takes whole disks, and a name can
+    # point at a partition (/dev/root is a link to sda1 on GitHub's runners, and its
+    # 8:1 fails with "no such device") or have no node at all (/dev/root on Ubuntu's
+    # cloud images). Nothing found: no disk limits, rather than containers that
+    # can't start.
     try:
-        dev = os.stat(path).st_dev
+        disk = _disk(os.stat(device).st_rdev)
+    except OSError:
+        disk = None
+    return disk or _device_by_number(path)
+
+
+def _disk(dev: int) -> str | None:
+    """The whole disk with device number *dev* (a partition's parent), from
+    /sys/dev/block, or None when it has no entry there or no node in /dev."""
+    if not dev:
+        return None
+    try:
         node = (_SYS_BLOCK / f"{os.major(dev)}:{os.minor(dev)}").resolve(strict=True)
     except OSError:
         return None
     disk = node.parent if (node / "partition").exists() else node
     candidate = _DEV / disk.name
     return str(candidate) if candidate.exists() else None
+
+
+def _device_by_number(path: str) -> str | None:
+    """The disk holding *path*, found by its device number in /sys/dev/block."""
+    try:
+        return _disk(os.stat(path).st_dev)
+    except OSError:
+        return None
 
 
 def detect_block_device() -> str | None:
