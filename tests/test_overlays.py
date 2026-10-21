@@ -86,7 +86,13 @@ def test_iot_overlay_no_platform_for_x86(mcu):
 
 def test_ai_overlay_services(rpi5):
     doc = _parse(render_overlay(rpi5, "ai", None))
-    assert set(doc["services"].keys()) == {"ollama", "letta", "n8n", "ei-runner"}
+    assert set(doc["services"].keys()) == {"ollama", "letta", "n8n", "ei-runner", "agent"}
+
+
+def test_ai_overlay_keeps_the_agent_small(rpi5):
+    limits = _parse(render_overlay(rpi5, "ai", ["ollama", "agent"]))["services"]["agent"]["deploy"]
+    memory = limits["resources"]["limits"]["memory"]
+    assert memory.endswith("m") and 200 <= int(memory[:-1]) <= 400
 
 
 def test_ai_overlay_ollama_gets_most_cpu(rpi5):

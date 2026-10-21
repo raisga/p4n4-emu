@@ -60,6 +60,9 @@ SERVICE_SHARES: dict[str, dict[str, Share]] = {
         "n8n": Share(0.20, 0.15),
         # The edge inference runner (profile ei-runner)
         "ei-runner": Share(0.25, 0.10),
+        # The incident investigator (profile agent): Node with a SQLite store,
+        # about 100 MB resident; the model runs in Ollama
+        "agent": Share(0.10, 0.04),
     },
     # The same runner in projects made before the edge layer merged into ai
     "edge": {
